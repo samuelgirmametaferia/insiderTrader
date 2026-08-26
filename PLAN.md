@@ -2283,3 +2283,7 @@ authorization, optimistic-concurrency, and idempotency checks remain unchanged.
 Accepted connections also enforce 30-second read and write deadlines, releasing
 clients that stop mid-frame or stop consuming responses instead of blocking the
 bridge indefinitely.
+
+GitHub CI now installs Python from `.python-version` with `actions/setup-python`
+before running repository checks, aligning CI with the Python version declared by
+the SDK package metadata and contributor setup.
