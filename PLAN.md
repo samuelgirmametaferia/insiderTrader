@@ -2258,7 +2258,9 @@ provider/package registration path as paper mode, then exits before starting wor
 loops or binding the IPC socket. `make paper-check` runs this preflight with a copied
 example configuration and private temporary paths, so deployment automation can
 objectively verify startup without touching repository data or creating a live
-execution endpoint.
+execution endpoint. The target additionally asserts that a journal file exists and
+the requested socket path remains absent after the check, making the no-worker/no-IPC
+contract directly testable.
 
 The contributor `make paper` target is now a real fail-closed launcher rather than an
 instruction-only alias. It requires an existing deployment-owned CFG plus explicit

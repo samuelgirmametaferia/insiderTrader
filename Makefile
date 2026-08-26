@@ -30,4 +30,4 @@ paper:
 # socket or starts background workers. This is the composition-root check used
 # by deployment automation before invoking the long-running `paper` command.
 paper-check:
-	@set -eu; tmp_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/insidertrader-paper-check.XXXXXX"); trap 'rm -rf "$$tmp_dir"' EXIT INT TERM; cp config/example.cfg "$$tmp_dir/example.cfg"; cargo run --locked -p insider-desktop-bridge -- serve --check --config "$$tmp_dir/example.cfg" --journal "$$tmp_dir/runtime.journal" --socket "$$tmp_dir/runtime.sock" --account 1 --instrument 1 --symbol AAPL --price 100000
+	@set -eu; tmp_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/insidertrader-paper-check.XXXXXX"); trap 'rm -rf "$$tmp_dir"' EXIT INT TERM; cp config/example.cfg "$$tmp_dir/example.cfg"; cargo run --locked -p insider-desktop-bridge -- serve --check --config "$$tmp_dir/example.cfg" --journal "$$tmp_dir/runtime.journal" --socket "$$tmp_dir/runtime.sock" --account 1 --instrument 1 --symbol AAPL --price 100000; test -f "$$tmp_dir/runtime.journal"; test ! -e "$$tmp_dir/runtime.sock"
