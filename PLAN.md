@@ -2301,3 +2301,7 @@ the detected version before dependency-heavy tests begin.
 The README paper-start example now invokes the locked workspace binary through
 `cargo run --locked -p insider-desktop-bridge`, so a fresh checkout does not assume
 an untracked executable has already been installed into `PATH`.
+
+That example now includes the explicit deterministic `--instrument 1 --symbol AAPL
+--price 100000` paper fixture and labels it non-authoritative, giving a first-run
+operator visible market state without conflating demo data with a live provider.

@@ -73,8 +73,13 @@ cargo run --locked -p insider-desktop-bridge -- serve \
   --config data/insidertrader.cfg \
   --journal data/runtime.journal \
   --socket data/runtime.sock \
-  --account 1
+  --account 1 \
+  --instrument 1 --symbol AAPL --price 100000
 ```
+
+The `--instrument`/`--price` pair is a deterministic paper-demo quote fixture;
+remove it when using an authoritative configured market provider. It is never a
+live mark and cannot enable live trading.
 
 The file uses bounded `key = value` syntax. `cfg-core` rejects duplicate keys,
 invalid scalars, non-finite numbers, oversized input, and malformed strings before
