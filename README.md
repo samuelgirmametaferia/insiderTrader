@@ -63,6 +63,7 @@ Start from [`config/example.cfg`](config/example.cfg) and pass the deployment-ow
 copy to the desktop bridge:
 
 ```bash
+mkdir -p data
 cp config/example.cfg data/insidertrader.cfg
 insider-desktop-bridge serve \
   --config data/insidertrader.cfg \
