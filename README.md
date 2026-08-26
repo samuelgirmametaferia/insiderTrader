@@ -64,7 +64,8 @@ copy to the desktop bridge:
 
 ```bash
 mkdir -p data
-cp config/example.cfg data/insidertrader.cfg
+test ! -e data/insidertrader.cfg || { echo "data/insidertrader.cfg already exists; refusing overwrite" >&2; exit 1; }
+install -m 0600 config/example.cfg data/insidertrader.cfg
 insider-desktop-bridge serve \
   --config data/insidertrader.cfg \
   --journal data/runtime.journal \
