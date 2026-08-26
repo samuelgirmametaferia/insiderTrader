@@ -30,6 +30,11 @@ jobs:
           components: rustfmt, clippy
           cache: true
 
+      - name: Install pinned Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
       - name: Install schema and UI prerequisites
         run: |
           sudo apt-get update
