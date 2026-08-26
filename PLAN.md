@@ -2305,3 +2305,7 @@ an untracked executable has already been installed into `PATH`.
 That example now includes the explicit deterministic `--instrument 1 --symbol AAPL
 --price 100000` paper fixture and labels it non-authoritative, giving a first-run
 operator visible market state without conflating demo data with a live provider.
+
+GitHub issue creation is now restricted to the structured bug and feature templates
+via `.github/ISSUE_TEMPLATE/config.yml`; blank issues are disabled so safety,
+configuration, and reproducibility details cannot be silently omitted from review.
