@@ -2259,3 +2259,9 @@ loops or binding the IPC socket. `make paper-check` runs this preflight with a c
 example configuration and private temporary paths, so deployment automation can
 objectively verify startup without touching repository data or creating a live
 execution endpoint.
+
+The contributor `make paper` target is now a real fail-closed launcher rather than an
+instruction-only alias. It requires an existing deployment-owned CFG plus explicit
+journal and socket paths (`IT_CONFIG`, `IT_JOURNAL`, `IT_SOCKET`; account defaults to
+`IT_ACCOUNT=1`) and passes those values directly to the locked desktop-bridge binary.
+An unset path fails before any process or filesystem mutation.

@@ -31,6 +31,9 @@ example configuration into a private temporary directory and executes the real
 desktop-bridge composition root with `--check`; configuration bounds, journal
 recovery, catalog, broker, risk, provider, and package registration must all pass.
 The check does not bind a socket, spawn schedulers, or touch repository data.
+For the long-running launcher, `make paper` is deliberately fail-closed and requires
+`IT_CONFIG`, `IT_JOURNAL`, and `IT_SOCKET` deployment-owned paths; `IT_ACCOUNT`
+defaults to `1`.
 
 The UI toolchain is pinned to Node `22.22.2` and npm `12.0.2`. Use a version
 manager that reads [`ui/.node-version`](ui/.node-version), then install and test
