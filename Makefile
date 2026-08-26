@@ -24,7 +24,15 @@ fmt:
 	cargo fmt --all -- --check
 
 paper:
-	@set -eu; : "$${IT_CONFIG:?set IT_CONFIG to a deployment-owned .cfg path}"; : "$${IT_JOURNAL:?set IT_JOURNAL to a deployment-owned journal path}"; : "$${IT_SOCKET:?set IT_SOCKET to a deployment-owned Unix socket path}"; account="$${IT_ACCOUNT:-1}"; test -f "$$IT_CONFIG"; cargo run --locked -p insider-desktop-bridge -- serve --config "$$IT_CONFIG" --journal "$$IT_JOURNAL" --socket "$$IT_SOCKET" --account "$$account"
+	@set -eu; \
+	: "$${IT_CONFIG:?set IT_CONFIG to a deployment-owned .cfg path}"; \
+	: "$${IT_JOURNAL:?set IT_JOURNAL to a deployment-owned journal path}"; \
+	: "$${IT_SOCKET:?set IT_SOCKET to a deployment-owned Unix socket path}"; \
+	account="$${IT_ACCOUNT:-1}"; \
+	test -f "$$IT_CONFIG"; \
+	cargo run --locked -p insider-desktop-bridge -- serve \
+		--config "$$IT_CONFIG" --journal "$$IT_JOURNAL" \
+		--socket "$$IT_SOCKET" --account "$$account"
 
 # Safe preflight: uses a private temporary directory and never binds an IPC
 # socket or starts background workers. This is the composition-root check used
