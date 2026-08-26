@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package insidertrader.ipc.v1;
+
+import "identity.proto";
+
+message CommandEnvelope {
+  insidertrader.identity.v1.CommandId command_id = 1;
+  insidertrader.identity.v1.TraceId trace_id = 2;
+  string actor = 3;
+  uint64 issued_wall_ns = 4;
+  uint64 expected_state_version = 5;
+  string idempotency_key = 6;
+  bytes payload = 7;
+}

@@ -1,0 +1,14 @@
+[package]
+name = "insider-autonomy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+insider-common-types = { path = "../common-types" }
+insider-llm-core = { path = "../llm-core" }
+insider-strategy-sdk = { path = "../strategy-sdk" }

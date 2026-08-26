@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package insidertrader.decision.v1;
+
+import "identity.proto";
+
+message MetricOutput {
+  string metric_id = 1;
+  insidertrader.identity.v1.InstrumentId instrument_id = 2;
+  uint64 generated_mono_ns = 3;
+  uint64 horizon_ns = 4;
+  uint64 ttl_ns = 5;
+  double score = 6;
+  double confidence = 7;
+  double uncertainty = 8;
+  bytes feature_snapshot_id = 9;
+}

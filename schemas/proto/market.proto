@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package insidertrader.market.v1;
+
+import "identity.proto";
+
+enum AssetClass { ASSET_CLASS_UNSPECIFIED = 0; EQUITY = 1; ETF = 2; OPTION = 3; FUTURE = 4; FX = 5; CRYPTO = 6; }
+message Instrument {
+  insidertrader.identity.v1.InstrumentId id = 1;
+  string canonical_symbol = 2;
+  AssetClass asset_class = 3;
+  string currency = 4;
+  string venue = 5;
+  string provider_symbol = 6;
+  uint64 valid_from_wall_ns = 7;
+  uint64 valid_to_wall_ns = 8;
+}

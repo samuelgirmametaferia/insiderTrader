@@ -1,0 +1,11 @@
+# Strict key/value manifest consumed by insider-metric-host discovery.
+metric:
+id: momentum.fast.v1
+inputs: [return_1m, return_5m]
+min_score: -1.0
+max_score: 1.0
+ttl_ns: 3000000000
+period_ns: 1000000000
+deadline_ns: 2000000
+budget_ns: 1000000
+priority: fast

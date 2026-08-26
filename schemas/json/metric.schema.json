@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insidertrader.local/schemas/metric.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["metric"],
+  "properties": {
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "language", "entrypoint", "inputs", "output", "scheduling"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$"},
+        "language": {"enum": ["rust", "python"]},
+        "entrypoint": {"type": "string", "minLength": 1},
+        "inputs": {"type": "object"},
+        "output": {"type": "object"},
+        "scheduling": {"type": "object"}
+      }
+    }
+  }
+}
+

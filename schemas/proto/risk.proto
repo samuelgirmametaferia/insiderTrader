@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package insidertrader.risk.v1;
+
+import "identity.proto";
+
+enum RiskState {
+  RISK_STATE_UNSPECIFIED = 0;
+  RUNNING = 1;
+  REDUCE_ONLY = 2;
+  CANCEL_ONLY = 3;
+  HALTED = 4;
+}
+
+enum RiskDecisionType {
+  RISK_DECISION_UNSPECIFIED = 0;
+  ALLOW = 1;
+  RESIZE = 2;
+  DENY = 3;
+}
+
+message RiskLimits {
+  sint64 max_position_ticks = 1;
+  sint64 max_order_ticks = 2;
+  sint64 max_gross_notional_ticks = 3;
+  optional sint64 max_drawdown_bps = 4;
+}
+
+message RiskDecision {
+  RiskDecisionType decision = 1;
+  string reason_code = 2;
+  sint64 approved_quantity_ticks = 3;
+  RiskState state = 4;
+  uint64 evaluated_mono_ns = 5;
+  uint64 config_version = 6;
+  insidertrader.identity.v1.TraceId trace_id = 7;
+}

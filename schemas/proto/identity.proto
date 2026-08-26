@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package insidertrader.identity.v1;
+
+message TraceId { bytes value = 1; }
+message EventId { bytes value = 1; }
+message InstrumentId { bytes value = 1; }
+message AccountId { bytes value = 1; }
+message CommandId { bytes value = 1; }
+

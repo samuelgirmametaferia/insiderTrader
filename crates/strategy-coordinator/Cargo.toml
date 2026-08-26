@@ -1,0 +1,15 @@
+[package]
+name = "insider-strategy-coordinator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+insider-common-types = { path = "../common-types" }
+insider-strategy-sdk = { path = "../strategy-sdk" }
+insider-metric-host = { path = "../metric-host" }
+insider-strategy-host = { path = "../strategy-host" }

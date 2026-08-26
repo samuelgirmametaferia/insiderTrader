@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package insidertrader.journal.v1;
+
+import "identity.proto";
+
+message EventEnvelope {
+  uint32 schema_version = 1;
+  insidertrader.identity.v1.EventId event_id = 2;
+  insidertrader.identity.v1.TraceId trace_id = 3;
+  bytes aggregate_id = 4;
+  uint64 aggregate_sequence = 5;
+  uint64 generated_mono_ns = 6;
+  sint64 generated_wall_ns = 7;
+  bytes causation_id = 8;
+  string event_type = 9;
+  bytes payload = 10;
+  bytes payload_sha256 = 11;
+}

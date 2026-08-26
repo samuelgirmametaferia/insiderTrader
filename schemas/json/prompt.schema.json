@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insidertrader.local/schemas/prompt.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt"],
+  "properties": {
+    "prompt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "task", "template", "max_output_tokens"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$"},
+        "version": {"type": "string", "pattern": "^v[0-9]+$"},
+        "task": {"enum": ["news_tagging", "news_summary", "chart_context", "strategy_review", "autonomous_plan", "research"]},
+        "template": {"type": "string", "minLength": 1, "maxLength": 200000},
+        "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100000},
+        "output_schema_id": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

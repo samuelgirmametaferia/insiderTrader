@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package insidertrader.intelligence.v1;
+
+import "identity.proto";
+
+message NewsItem {
+  string id = 1;
+  string provider = 2;
+  string canonical_url = 3;
+  string source_name = 4;
+  string title = 5;
+  string summary_text = 6;
+  optional sint64 published_at_ms = 7;
+  sint64 received_at_ms = 8;
+  repeated string symbols = 9;
+  repeated string entities = 10;
+  string content_hash = 11;
+}
+
+message NewsCluster {
+  string cluster_id = 1;
+  repeated string item_ids = 2;
+  string algorithm_version = 3;
+  sint64 first_received_at_ms = 4;
+  sint64 last_received_at_ms = 5;
+}
+
+message GraphRef {
+  string node_type = 1;
+  string node_id = 2;
+  string edge_type = 3;
+  string provenance = 4;
+  double confidence = 5;
+  sint64 valid_from_ms = 6;
+  optional sint64 valid_to_ms = 7;
+}
+
+message LlmTrace {
+  string trace_id = 1;
+  string provider = 2;
+  string model = 3;
+  string prompt_version = 4;
+  bytes input_context_hash = 5;
+  bytes output_hash = 6;
+  uint64 input_tokens = 7;
+  uint64 output_tokens = 8;
+  sint64 generated_at_ms = 9;
+  uint64 ttl_ms = 10;
+  insidertrader.identity.v1.TraceId typed_trace_id = 11;
+}
+
+message ToolCall {
+  string tool_name = 1;
+  string request_id = 2;
+  bytes input_json = 3;
+  bytes output_json = 4;
+  uint64 deadline_ms = 5;
+}
+
+enum AutonomousActionType {
+  AUTONOMOUS_ACTION_UNSPECIFIED = 0;
+  EXECUTE_PROPOSAL = 1;
+  EXECUTE_PROPOSAL_SCALED = 2;
+  IGNORE_PROPOSAL = 3;
+  PAUSE_STRATEGY = 4;
+  RESUME_STRATEGY = 5;
+  REQUEST_REANALYSIS = 6;
+  ADD_TO_WATCH = 7;
+  REMOVE_FROM_WATCH = 8;
+  REDUCE_AUTONOMY = 9;
+  NO_ACTION = 10;
+}
+
+message AutonomousAction {
+  AutonomousActionType type = 1;
+  string proposal_id = 2;
+  double scale = 3;
+  string urgency = 4;
+  repeated string reason_codes = 5;
+}
+
+message AutonomousPlan {
+  string plan_id = 1;
+  string as_of_rfc3339 = 2;
+  repeated AutonomousAction actions = 3;
+  repeated string watch = 4;
+  uint64 reconsider_after_ms = 5;
+  string policy_version = 6;
+  bytes context_hash = 7;
+}

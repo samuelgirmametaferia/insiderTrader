@@ -1,0 +1,40 @@
+[package]
+name = "insider-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+insider-alerts = { path = "../alerts" }
+insider-autonomy = { path = "../autonomy" }
+insider-broker-api = { path = "../broker-api" }
+insider-cfg-core = { path = "../cfg-core" }
+insider-context-graph = { path = "../context-graph" }
+insider-common-types = { path = "../common-types" }
+insider-execution = { path = "../execution" }
+insider-portfolio = { path = "../portfolio" }
+insider-risk-engine = { path = "../risk-engine" }
+insider-journal = { path = "../journal" }
+insider-llm-core = { path = "../llm-core" }
+insider-strategy-sdk = { path = "../strategy-sdk" }
+insider-strategy-host = { path = "../strategy-host" }
+insider-strategy-coordinator = { path = "../strategy-coordinator" }
+insider-exchange-sim = { path = "../exchange-sim" }
+insider-experiment-registry = { path = "../experiment-registry" }
+insider-ipc = { path = "../ipc" }
+insider-instrument-master = { path = "../instrument-master" }
+insider-market-types = { path = "../market-types" }
+insider-market-data = { path = "../market-data" }
+insider-metric-sdk = { path = "../metric-sdk" }
+insider-metric-host = { path = "../metric-host" }
+insider-model-registry = { path = "../model-registry" }
+insider-read-model = { path = "../read-model" }
+insider-news-core = { path = "../news-core" }
+insider-replay = { path = "../replay" }
+insider-supervisor = { path = "../supervisor" }
+
+[dev-dependencies]

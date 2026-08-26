@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insidertrader.local/schemas/provider.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider"],
+  "properties": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "base_url", "enabled", "limits"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$"},
+        "kind": {"enum": ["market", "news", "llm", "broker"]},
+        "base_url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+        "api_key_ref": {"type": "string", "pattern": "^secret://[^\\s]+$"},
+        "enabled": {"type": "boolean"},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_requests", "window_ms", "max_items"],
+          "properties": {
+            "max_requests": {"type": "integer", "minimum": 1, "maximum": 100000},
+            "window_ms": {"type": "integer", "minimum": 1, "maximum": 86400000},
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 10000}
+          }
+        }
+      }
+    }
+  }
+}

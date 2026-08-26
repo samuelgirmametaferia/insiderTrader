@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package insidertrader.execution.v1;
+
+import "identity.proto";
+
+enum OrderState { ORDER_STATE_UNSPECIFIED = 0; CREATED = 1; RISK_APPROVED = 2; QUEUED = 3; SENDING = 4; SENT = 5; ACKNOWLEDGED = 6; PARTIALLY_FILLED = 7; FILLED = 8; UNKNOWN = 9; REJECTED = 10; CANCELLED = 11; }
+message OrderIntent {
+  string intent_id = 1;
+  insidertrader.identity.v1.AccountId account_id = 2;
+  insidertrader.identity.v1.InstrumentId instrument_id = 3;
+  string client_order_id = 4;
+  OrderState state = 5;
+  string quantity_decimal = 6;
+  string limit_price_decimal = 7;
+  insidertrader.identity.v1.TraceId trace_id = 8;
+}

@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package insidertrader.strategy.v1;
+
+import "identity.proto";
+
+enum StrategyActionType {
+  STRATEGY_ACTION_UNSPECIFIED = 0;
+  NO_ACTION = 1;
+  TARGET_QUANTITY = 2;
+  TARGET_WEIGHT = 3;
+  INCREASE = 4;
+  DECREASE = 5;
+  CLOSE = 6;
+}
+
+message StrategyManifest {
+  string strategy_id = 1;
+  string version = 2;
+  string mode = 3;
+  repeated string metric_ids = 4;
+  repeated string strategy_dependencies = 5;
+  uint64 horizon_ns = 6;
+  uint64 ttl_ns = 7;
+  uint64 period_ns = 8;
+  uint64 deadline_ns = 9;
+  string priority = 10;
+}
+
+message StrategyAction {
+  StrategyActionType type = 1;
+  sint64 quantity_ticks = 2;
+  double weight = 3;
+}
+
+message StrategyProposal {
+  insidertrader.identity.v1.EventId proposal_id = 1;
+  string strategy_id = 2;
+  string strategy_version = 3;
+  insidertrader.identity.v1.InstrumentId instrument_id = 4;
+  StrategyAction action = 5;
+  double confidence = 6;
+  uint64 expected_horizon_ns = 7;
+  uint64 ttl_ns = 8;
+  repeated string rationale_codes = 9;
+  repeated bytes evidence_refs = 10;
+  insidertrader.identity.v1.TraceId trace_id = 11;
+  uint64 generated_mono_ns = 12;
+}
+
+message ProposalConflict {
+  string conflict_id = 1;
+  repeated bytes proposal_ids = 2;
+  string policy = 3;
+  string reason = 4;
+}

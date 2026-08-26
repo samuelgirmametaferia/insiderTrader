@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insidertrader.local/schemas/gate-evidence.schema.json",
+  "title": "InsiderTrader gate evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["gate", "status", "source_revision", "completed_at", "verification", "security_findings", "approvals"],
+  "properties": {
+    "gate": { "pattern": "^G(0[0-9]|1[0-5])$", "type": "string" },
+    "status": { "const": "passed" },
+    "source_revision": { "pattern": "^[0-9a-f]{40}$", "type": "string" },
+    "completed_at": { "format": "date-time", "type": "string" },
+    "verification": { "minProperties": 1, "type": "object" },
+    "security_findings": {
+      "additionalProperties": false,
+      "properties": {
+        "critical_open": { "const": 0 },
+        "high_open": { "const": 0 }
+      },
+      "required": ["critical_open", "high_open"],
+      "type": "object"
+    },
+    "approvals": { "minItems": 1, "type": "array" },
+    "release_artifacts": { "type": "array" },
+    "known_limitations": { "type": "array" },
+    "schema_bundle_sha256": { "pattern": "^[0-9a-f]{64}$", "type": "string" }
+  }
+}
+

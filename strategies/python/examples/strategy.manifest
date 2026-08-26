@@ -1,0 +1,12 @@
+strategy:
+  id: "equity.python.threshold.v1"
+  language: "python"
+  entrypoint: "strategies.python.examples.threshold:evaluate"
+  mode: "deterministic"
+  metrics: [returns.python.v1]
+  dependencies: []
+  horizon_ns: 60000000000
+  ttl_ns: 5000000000
+  period_ns: 1000000000
+  deadline_ns: 2000000
+  priority: FAST

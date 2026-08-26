@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://insidertrader.local/schemas/strategy.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["strategy"],
+  "properties": {
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "language", "mode", "universe", "inputs", "output", "scheduling"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)+$"},
+        "language": {"enum": ["rust", "python"]},
+        "mode": {"enum": ["deterministic", "llm"]},
+        "universe": {"type": "object"},
+        "inputs": {"type": "object"},
+        "output": {"type": "object"},
+        "scheduling": {"type": "object"}
+      }
+    }
+  }
+}
+

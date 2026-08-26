@@ -1,0 +1,16 @@
+[package]
+name = "insider-strategy-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+insider-common-types = { path = "../common-types" }
+insider-metric-sdk = { path = "../metric-sdk" }
+insider-strategy-sdk = { path = "../strategy-sdk" }
+insider-scheduler = { path = "../scheduler" }
+serde_json = "1"

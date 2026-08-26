@@ -1,0 +1,10 @@
+metric:
+  id: "returns.python.v1"
+  language: "python"
+  entrypoint: "metrics.python.examples.ewma_return:evaluate"
+  inputs: [return]
+  ttl_ns: 1000000000
+  period_ns: 100000000
+  deadline_ns: 10000000
+  budget_ns: 5000000
+  priority: FAST
