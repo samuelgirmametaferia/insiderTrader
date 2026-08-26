@@ -12,7 +12,7 @@ Then hydrate dependencies without changing lockfiles:
 
 ```bash
 cargo test --workspace
-python3 -m pytest
+PYTHONPATH=python python3 -m unittest discover -s tests/python -p 'test_*.py'
 cd ui && npm ci && npm test && npm run check && npm run build
 ```
 
@@ -25,6 +25,12 @@ The complete required gate is:
 Run it before opening a pull request. It checks formatting, Clippy, Rust and Python
 tests, schema/dependency/license/security/documentation contracts, UI tests and build,
 and the CFG/runbook requirements.
+
+For a safe paper startup preflight using isolated temporary paths, run:
+
+```bash
+make paper-check
+```
 
 ## Configuration and secrets
 
