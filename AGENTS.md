@@ -953,6 +953,11 @@ Late metric/strategy outputs are recorded but rejected when TTL/deadline semanti
 - durable async: append-only event stream/log
 Large chart batches and features SHOULD move through binary arrays/Arrow-like memory rather than per-object JSON.
 LLM/news control messages may use normal structured serialization because they are not microsecond-path data.
+The Unix desktop bridge MUST enforce bounded request payloads, owner-only socket
+permissions, per-connection request counts, and read/write deadlines so an abandoned
+or abusive client cannot monopolize the accept loop. `serve --check` MUST validate
+startup composition, journal recovery, canonical paper fixture ingestion, and
+provider/package registration without binding the IPC socket or starting workers.
 ## 41. Journal and trace model
 Every trade decision should be reconstructible through a `TraceId`.
 Trace chain:
