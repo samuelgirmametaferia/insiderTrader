@@ -69,7 +69,7 @@ copy to the desktop bridge:
 mkdir -p data
 test ! -e data/insidertrader.cfg || { echo "data/insidertrader.cfg already exists; refusing overwrite" >&2; exit 1; }
 install -m 0600 config/example.cfg data/insidertrader.cfg
-insider-desktop-bridge serve \
+cargo run --locked -p insider-desktop-bridge -- serve \
   --config data/insidertrader.cfg \
   --journal data/runtime.journal \
   --socket data/runtime.sock \
