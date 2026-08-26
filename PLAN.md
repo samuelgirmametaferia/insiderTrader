@@ -2262,6 +2262,10 @@ execution endpoint. The target additionally asserts that a journal file exists a
 the requested socket path remains absent after the check, making the no-worker/no-IPC
 contract directly testable.
 
+The preflight now ingests the optional `--instrument`/`--price` paper fixture
+before exiting, so its successful result also proves canonical instrument
+registration and quote validation rather than merely checking configuration.
+
 The contributor `make paper` target is now a real fail-closed launcher rather than an
 instruction-only alias. It requires an existing deployment-owned CFG plus explicit
 journal and socket paths (`IT_CONFIG`, `IT_JOURNAL`, `IT_SOCKET`; account defaults to

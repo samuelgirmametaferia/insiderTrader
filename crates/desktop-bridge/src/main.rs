@@ -1988,23 +1988,11 @@ fn serve(args: &[String]) -> Result<(), String> {
     configure_yahoo_news_polling(&host, args, &startup_settings)?;
     configure_python_packages(&host, &startup_settings)?;
 
-    // `--check` intentionally stops before spawning background workers or
-    // binding the IPC socket. This exercises the same bounded configuration,
-    // journal recovery, broker, catalog, risk, provider, and package
-    // composition path used by `serve`, while making startup certification
-    // safe to run in CI and deployment preflight jobs.
-    if args.iter().any(|arg| arg == "--check") {
-        return Ok(());
-    }
-
-    start_python_scheduler(&host, &startup_settings)?;
-    start_execution_scheduler(&host, &startup_settings)?;
-    start_reconciliation_loop(&host, &startup_settings)?;
-    start_alert_webhook_loop(&host, &startup_settings)?;
-
     // The paper composition root exposes its configured instrument through the
     // same canonical market hub used by live/replay providers. This initial
     // quote is deliberately a provider fixture, not a UI-side synthetic mark.
+    // Run it before `--check` exits so preflight validates the complete fixture
+    // path, including instrument identity and quote invariants.
     if let (Some(instrument), Some(price)) = (
         optional_value(args, "--instrument").and_then(|value| value.parse::<u128>().ok()),
         optional_value(args, "--price").and_then(|value| value.parse::<i64>().ok()),
@@ -2028,6 +2016,21 @@ fn serve(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| format!("ingest paper quote: {error:?}"))?;
     }
+
+    // `--check` intentionally stops before spawning background workers or
+    // binding the IPC socket. This exercises the same bounded configuration,
+    // journal recovery, broker, catalog, risk, provider, and package
+    // composition path used by `serve`, while making startup certification
+    // safe to run in CI and deployment preflight jobs.
+    if args.iter().any(|arg| arg == "--check") {
+        return Ok(());
+    }
+
+    start_python_scheduler(&host, &startup_settings)?;
+    start_execution_scheduler(&host, &startup_settings)?;
+    start_reconciliation_loop(&host, &startup_settings)?;
+    start_alert_webhook_loop(&host, &startup_settings)?;
+
     configure_yahoo_history(&host, args, &startup_settings);
     configure_yahoo_quotes(&host, args, &startup_settings);
     if let Some(start) = ibkr_market_poll {
