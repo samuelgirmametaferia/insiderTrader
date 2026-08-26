@@ -2267,3 +2267,8 @@ instruction-only alias. It requires an existing deployment-owned CFG plus explic
 journal and socket paths (`IT_CONFIG`, `IT_JOURNAL`, `IT_SOCKET`; account defaults to
 `IT_ACCOUNT=1`) and passes those values directly to the locked desktop-bridge binary.
 An unset path fails before any process or filesystem mutation.
+
+The Unix desktop transport now caps each accepted connection at 256 complete
+request/response exchanges. Clients reconnect transparently per command, while a
+held connection cannot monopolize the bounded accept loop indefinitely; payload,
+authorization, optimistic-concurrency, and idempotency checks remain unchanged.

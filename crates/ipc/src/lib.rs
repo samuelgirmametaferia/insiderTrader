@@ -693,6 +693,11 @@ pub struct UnixSocketServer {
     frame_codec: FrameCodec,
 }
 
+/// Maximum number of request/response exchanges served before a client
+/// connection is closed. Clients can reconnect, but cannot monopolize the
+/// single bounded server accept loop indefinitely.
+const MAX_REQUESTS_PER_CONNECTION: usize = 256;
+
 #[cfg(unix)]
 impl UnixSocketServer {
     /// Binds a local socket and applies owner-only permissions.
@@ -767,7 +772,7 @@ impl UnixSocketServer {
     {
         use std::io::{Read, Write};
         let (mut stream, _) = self.listener.accept()?;
-        loop {
+        for _ in 0..MAX_REQUESTS_PER_CONNECTION {
             let mut prefix = [0_u8; 4];
             match stream.read_exact(&mut prefix) {
                 Ok(()) => {}
@@ -791,6 +796,7 @@ impl UnixSocketServer {
             stream.write_all(&frame)?;
             stream.flush()?;
         }
+        Ok(())
     }
 }
 
