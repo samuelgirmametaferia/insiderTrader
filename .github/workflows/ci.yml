@@ -53,9 +53,20 @@ jobs:
         run: npm ci --prefix ui
 
       - name: Verify all repository gates
+        id: gate
         env:
           IT_RUSTUP_TOOLCHAIN: stable
-        run: ./scripts/check.sh
+        run: |
+          set -o pipefail
+          ./scripts/check.sh 2>&1 | tee gate.log
+
+      - name: Upload repository gate log
+        if: always() && steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: insidertrader-gate-log
+          path: gate.log
+          if-no-files-found: ignore
 
       - name: Preflight paper composition root
         run: make paper-check

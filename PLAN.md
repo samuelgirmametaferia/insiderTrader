@@ -2287,3 +2287,8 @@ bridge indefinitely.
 GitHub CI now installs Python from `.python-version` with `actions/setup-python`
 before running repository checks, aligning CI with the Python version declared by
 the SDK package metadata and contributor setup.
+
+The CI gate now runs with `pipefail` while teeing its complete output to `gate.log`;
+failed verification uploads that log as a GitHub artifact. The CI contract checker
+asserts the logging pipeline and upload step, so diagnostics cannot silently be
+removed while preserving a superficial green-check workflow.
