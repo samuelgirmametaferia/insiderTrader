@@ -46,7 +46,7 @@ use insider_desktop_bridge::DesktopBridge;
 fn usage() {
     eprintln!(
         "usage: insider-desktop-bridge serve --journal PATH --socket PATH [--config PATH] [--account ID] \\
-         [--instrument ID --symbol SYMBOL --price TICKS]"
+         [--check] [--instrument ID --symbol SYMBOL --price TICKS]"
     );
 }
 
@@ -1987,6 +1987,16 @@ fn serve(args: &[String]) -> Result<(), String> {
     configure_news_polling(&host, args, &startup_settings)?;
     configure_yahoo_news_polling(&host, args, &startup_settings)?;
     configure_python_packages(&host, &startup_settings)?;
+
+    // `--check` intentionally stops before spawning background workers or
+    // binding the IPC socket. This exercises the same bounded configuration,
+    // journal recovery, broker, catalog, risk, provider, and package
+    // composition path used by `serve`, while making startup certification
+    // safe to run in CI and deployment preflight jobs.
+    if args.iter().any(|arg| arg == "--check") {
+        return Ok(());
+    }
+
     start_python_scheduler(&host, &startup_settings)?;
     start_execution_scheduler(&host, &startup_settings)?;
     start_reconciliation_loop(&host, &startup_settings)?;

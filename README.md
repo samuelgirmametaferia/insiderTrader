@@ -26,6 +26,12 @@ For discoverable contributor shortcuts, `make test` runs the Rust, Python, and U
 tests; `make ui-build` runs the UI source check and production build; `make fmt` checks
 Rust formatting. These aliases do not replace the full `make check` gate.
 
+Before starting a long-running paper process, run `make paper-check`. It copies the
+example configuration into a private temporary directory and executes the real
+desktop-bridge composition root with `--check`; configuration bounds, journal
+recovery, catalog, broker, risk, provider, and package registration must all pass.
+The check does not bind a socket, spawn schedulers, or touch repository data.
+
 The UI toolchain is pinned to Node `22.22.2` and npm `12.0.2`. Use a version
 manager that reads [`ui/.node-version`](ui/.node-version), then install and test
 from the UI package directory (the root has no npm project):

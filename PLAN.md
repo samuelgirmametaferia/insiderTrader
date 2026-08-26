@@ -2251,3 +2251,11 @@ The chart runtime regression benchmark now uses a 2-second runaway-work ceiling 
 the maximum 4,096-candle render and explicitly leaves frame-budget monitoring to the
 renderer telemetry. This avoids machine-load-dependent false failures while retaining
 an objective upper bound on pathological render regressions.
+
+The desktop bridge now supports a bounded `serve --check` preflight. It executes the
+same startup configuration, journal recovery, broker/catalog/risk composition, and
+provider/package registration path as paper mode, then exits before starting worker
+loops or binding the IPC socket. `make paper-check` runs this preflight with a copied
+example configuration and private temporary paths, so deployment automation can
+objectively verify startup without touching repository data or creating a live
+execution endpoint.

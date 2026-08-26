@@ -52,6 +52,9 @@ jobs:
           IT_RUSTUP_TOOLCHAIN: stable
         run: ./scripts/check.sh
 
+      - name: Preflight paper composition root
+        run: make paper-check
+
       - name: Compile Tauri desktop target
         run: cargo check --manifest-path ui/src-tauri/Cargo.toml --locked
 
