@@ -2280,3 +2280,6 @@ The Unix desktop transport now caps each accepted connection at 256 complete
 request/response exchanges. Clients reconnect transparently per command, while a
 held connection cannot monopolize the bounded accept loop indefinitely; payload,
 authorization, optimistic-concurrency, and idempotency checks remain unchanged.
+Accepted connections also enforce 30-second read and write deadlines, releasing
+clients that stop mid-frame or stop consuming responses instead of blocking the
+bridge indefinitely.

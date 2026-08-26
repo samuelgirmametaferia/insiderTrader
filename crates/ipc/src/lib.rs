@@ -697,6 +697,7 @@ pub struct UnixSocketServer {
 /// connection is closed. Clients can reconnect, but cannot monopolize the
 /// single bounded server accept loop indefinitely.
 const MAX_REQUESTS_PER_CONNECTION: usize = 256;
+const CONNECTION_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(unix)]
 impl UnixSocketServer {
@@ -772,6 +773,8 @@ impl UnixSocketServer {
     {
         use std::io::{Read, Write};
         let (mut stream, _) = self.listener.accept()?;
+        stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT))?;
         for _ in 0..MAX_REQUESTS_PER_CONNECTION {
             let mut prefix = [0_u8; 4];
             match stream.read_exact(&mut prefix) {
