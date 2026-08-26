@@ -2297,3 +2297,7 @@ Contributor and CI toolchain checks now share `make doctor`, which compares the
 installed Rust, Python, Node, and npm versions against `rust-toolchain.toml`,
 `.python-version`, `ui/.node-version`, and `ui/package.json`. Mismatches fail with
 the detected version before dependency-heavy tests begin.
+
+The README paper-start example now invokes the locked workspace binary through
+`cargo run --locked -p insider-desktop-bridge`, so a fresh checkout does not assume
+an untracked executable has already been installed into `PATH`.
