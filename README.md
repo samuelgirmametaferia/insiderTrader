@@ -3,6 +3,8 @@
 InsiderTrader is a deterministic, deadline-aware trading engine and professional
 desktop workstation. Read `AGENTS.md` for normative architecture and `PLAN.md` for
 the production implementation and certification gates.
+See [`CHANGELOG.md`](CHANGELOG.md) for the current release boundary and explicit
+distinction between implemented behavior and pending operational certification.
 
 The implementation is under active construction. No gate is complete until its
 same-revision evidence exists under `evidence/gates/`.
