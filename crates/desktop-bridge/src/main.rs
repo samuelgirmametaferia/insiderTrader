@@ -63,6 +63,31 @@ fn optional_value(args: &[String], name: &str) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
+fn configured_paper_quote(args: &[String]) -> Result<Option<(InstrumentId, i64)>, String> {
+    let instrument_arg = optional_value(args, "--instrument");
+    let price_arg = optional_value(args, "--price");
+    match (instrument_arg, price_arg) {
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => {
+            Err("--instrument and --price must be supplied together".to_owned())
+        }
+        (Some(instrument), Some(price)) => {
+            let instrument = instrument.parse::<u128>().map_err(|error| {
+                format!("--instrument must be a valid positive integer: {error}")
+            })?;
+            let instrument = InstrumentId::new(instrument)
+                .map_err(|error| format!("market instrument: {error}"))?;
+            let price = price
+                .parse::<i64>()
+                .map_err(|error| format!("--price must be a valid integer: {error}"))?;
+            if price <= 0 {
+                return Err("--price must be positive".to_owned());
+            }
+            Ok(Some((instrument, price)))
+        }
+    }
+}
+
 fn configured_cfg_settings(args: &[String]) -> Result<Settings, String> {
     let Some(path) = optional_value(args, "--config") else {
         return Ok(Settings::new());
@@ -1993,12 +2018,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     // quote is deliberately a provider fixture, not a UI-side synthetic mark.
     // Run it before `--check` exits so preflight validates the complete fixture
     // path, including instrument identity and quote invariants.
-    if let (Some(instrument), Some(price)) = (
-        optional_value(args, "--instrument").and_then(|value| value.parse::<u128>().ok()),
-        optional_value(args, "--price").and_then(|value| value.parse::<i64>().ok()),
-    ) {
-        let instrument =
-            InstrumentId::new(instrument).map_err(|error| format!("market instrument: {error}"))?;
+    if let Some((instrument, price)) = configured_paper_quote(args)? {
         host.register_market_instrument(instrument)
             .map_err(|error| format!("register market instrument: {error:?}"))?;
         host.ingest_market_event(
@@ -2073,11 +2093,49 @@ mod tests {
     use super::{
         configured_alert_webhook_url, configured_bool, configured_cfg_settings,
         configured_env_string, configured_env_u64, configured_f64, configured_news_retry_policy,
-        configured_optional_string, configured_positive_i64_setting,
+        configured_optional_string, configured_paper_quote, configured_positive_i64_setting,
         configured_positive_i128_setting, configured_string, configured_u64, valid_ibkr_account_id,
         validate_llm_base_url, validate_llm_metadata,
     };
     use insider_cfg_core::{Settings, Value};
+
+    #[test]
+    fn paper_quote_arguments_are_complete_bounded_and_positive() {
+        let valid = vec![
+            "serve".to_owned(),
+            "--instrument".to_owned(),
+            "7".to_owned(),
+            "--price".to_owned(),
+            "10000".to_owned(),
+        ];
+        let quote = configured_paper_quote(&valid).ok().flatten();
+        assert_eq!(quote.map(|(_, price)| price), Some(10_000));
+
+        let missing_price = vec![
+            "serve".to_owned(),
+            "--instrument".to_owned(),
+            "7".to_owned(),
+        ];
+        assert!(configured_paper_quote(&missing_price).is_err());
+
+        let malformed_price = vec![
+            "serve".to_owned(),
+            "--instrument".to_owned(),
+            "7".to_owned(),
+            "--price".to_owned(),
+            "not-a-price".to_owned(),
+        ];
+        assert!(configured_paper_quote(&malformed_price).is_err());
+
+        let non_positive = vec![
+            "serve".to_owned(),
+            "--instrument".to_owned(),
+            "7".to_owned(),
+            "--price".to_owned(),
+            "0".to_owned(),
+        ];
+        assert!(configured_paper_quote(&non_positive).is_err());
+    }
 
     #[test]
     fn config_argument_loads_typed_cfg_values() {

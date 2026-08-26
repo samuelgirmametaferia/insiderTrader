@@ -2266,6 +2266,10 @@ The preflight now ingests the optional `--instrument`/`--price` paper fixture
 before exiting, so its successful result also proves canonical instrument
 registration and quote validation rather than merely checking configuration.
 
+Paper quote CLI arguments are now fail-closed: `--instrument` and `--price` must
+appear together, both must parse, instrument identity must be valid, and price must
+be strictly positive. Previously malformed values could be silently ignored.
+
 The contributor `make paper` target is now a real fail-closed launcher rather than an
 instruction-only alias. It requires an existing deployment-owned CFG plus explicit
 journal and socket paths (`IT_CONFIG`, `IT_JOURNAL`, `IT_SOCKET`; account defaults to
