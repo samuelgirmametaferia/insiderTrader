@@ -2292,3 +2292,8 @@ The CI gate now runs with `pipefail` while teeing its complete output to `gate.l
 failed verification uploads that log as a GitHub artifact. The CI contract checker
 asserts the logging pipeline and upload step, so diagnostics cannot silently be
 removed while preserving a superficial green-check workflow.
+
+Contributor and CI toolchain checks now share `make doctor`, which compares the
+installed Rust, Python, Node, and npm versions against `rust-toolchain.toml`,
+`.python-version`, `ui/.node-version`, and `ui/package.json`. Mismatches fail with
+the detected version before dependency-heavy tests begin.

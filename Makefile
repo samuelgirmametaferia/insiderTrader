@@ -1,9 +1,12 @@
-.PHONY: check test rust-test python-test ui-test ui-build fmt paper paper-check
+.PHONY: check doctor test rust-test python-test ui-test ui-build fmt paper paper-check
 
 # The shell gate remains authoritative; these targets are discoverable aliases
 # for contributors and never weaken the required verification command.
 check:
 	./scripts/check.sh
+
+doctor:
+	@set -eu; rust_version=$$(rustc --version | awk '{print $$2}'); test "$$rust_version" = "1.98.0" || { echo "Rust 1.98.0 required; found $$rust_version" >&2; exit 1; }; python_version=$$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")'); test "$$python_version" = "3.14" || { echo "Python 3.14 required; found $$python_version" >&2; exit 1; }; node_version=$$(node --version); test "$$node_version" = "v22.22.2" || { echo "Node v22.22.2 required; found $$node_version" >&2; exit 1; }; npm_version=$$(npm --version 2>/dev/null); test "$$npm_version" = "12.0.2" || { echo "npm 12.0.2 required; found $$npm_version" >&2; exit 1; }; echo "InsiderTrader toolchain is pinned and ready."
 
 test: rust-test python-test ui-test
 

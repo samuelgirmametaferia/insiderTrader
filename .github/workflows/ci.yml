@@ -52,6 +52,9 @@ jobs:
       - name: Install locked UI dependencies
         run: npm ci --prefix ui
 
+      - name: Verify pinned toolchain
+        run: make doctor
+
       - name: Verify all repository gates
         id: gate
         env:

@@ -22,6 +22,7 @@ def main() -> int:
         "set -o pipefail",
         "./scripts/check.sh 2>&1 | tee gate.log",
         "actions/upload-artifact@v4",
+        "run: make doctor",
     )
     missing = [marker for marker in required if marker not in text]
     if missing:

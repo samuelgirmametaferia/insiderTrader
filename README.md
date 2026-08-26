@@ -25,6 +25,7 @@ before any live canary.
 For discoverable contributor shortcuts, `make test` runs the Rust, Python, and UI
 tests; `make ui-build` runs the UI source check and production build; `make fmt` checks
 Rust formatting. These aliases do not replace the full `make check` gate.
+Run `make doctor` first to verify the pinned Rust, Python, Node, and npm versions.
 
 Before starting a long-running paper process, run `make paper-check`. It copies the
 example configuration into a private temporary directory and executes the real
