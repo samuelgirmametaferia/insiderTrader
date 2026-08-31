@@ -3,8 +3,8 @@
 > Status: normative execution plan.
 > Authority: this file operationalizes `AGENTS.md`. If they conflict, `AGENTS.md`
 > defines architecture and safety; this file defines delivery order and proof.
-> Initial release: Linux desktop, local service topology, Interactive Brokers,
-> research + paper + live trading, React/Tauri UI, multi-asset domain model.
+> Initial release: Linux terminal workstation, local service topology, Interactive Brokers,
+> research + paper + live trading, native Rust client, multi-asset domain model.
 
 ## 1. How this plan is used
 
@@ -58,13 +58,13 @@ is x86-64 Linux, 8 physical cores, 32 GiB RAM, NVMe storage, and a 1920x1080 dis
 CI may use slower hardware but must normalize against a stored reference baseline.
 
 - Engine idle RSS: <= 750 MiB excluding configured data caches and model workers.
-- UI idle RSS: <= 600 MiB with the Trading workspace open.
+- Terminal idle RSS: <= 150 MiB with the Trading function open.
 - Journal append: p99 <= 2 ms for 1 KiB events with durability policy enabled.
 - In-process event handoff: p99 <= 250 us at 50,000 events/second.
 - Quote-to-deterministic-strategy-proposal: p99 <= 25 ms for `FAST` workloads.
 - Risk decision: p99 <= 5 ms for a single target and <= 25 ms for 500 targets.
-- UI chart update: >= 55 FPS while ingesting 10,000 updates/second in batches.
-- UI input response: p95 <= 100 ms; no task > 50 ms on the browser main thread.
+- Terminal redraw: p95 <= 16 ms while ingesting 10,000 updates/second in bounded batches.
+- Terminal input response: p95 <= 50 ms; no rendering or command-dispatch task > 25 ms.
 - Recovery: engine authoritative state restored and reconciliation started within
   30 seconds after an unclean restart on the reference dataset.
 - No unbounded queue is permitted. Every queue declares capacity, overflow policy,
@@ -79,9 +79,9 @@ These are implementation decisions, not work left to the implementer:
 
 1. Rust stable pinned by `rust-toolchain.toml`; Tokio for async control-plane work.
 2. Python version pinned in `.python-version`; `uv` owns Python dependency locking.
-3. React + TypeScript + Vite inside Tauri 2; Dockview for layouts; Lightweight
-   Charts for financial charts; Zustand for low-rate UI state. Tick batches bypass
-   Zustand and enter chart adapters directly.
+3. Ratatui + Crossterm in a native Rust client; mnemonic functions and keyboard
+   navigation are the primary interaction model. The terminal owns presentation
+   state only and communicates with the headless runtime over authenticated Unix IPC.
 4. Protobuf is the versioned service/event schema source where binary transport is
    needed; JSON Schema is generated for manifests/config/LLM structured output.
    `rust_decimal::Decimal` is used for money/quantity. Floating point is allowed
@@ -94,7 +94,7 @@ These are implementation decisions, not work left to the implementer:
 7. One `engine` executable supervises local components initially. Component traits,
    Protobuf contracts, and journal events are process-safe boundaries so market,
    research, and execution services can later be extracted without changing domain
-   semantics. The Tauri UI is always a client and never authoritative.
+   semantics. The native terminal is always a client and never authoritative.
 8. Interactive Brokers is the first certified broker. The adapter wraps the IBKR
    API behind `BrokerGateway`; no other crate imports IBKR-specific types.
 9. Multi-asset means the canonical model supports stocks/ETFs, options, futures,
@@ -507,12 +507,26 @@ recovered from journal; backup/restore hashes match; unclean reboot reaches reco
 within 30 seconds on reference data; remote transport can be added by implementing
 the transport trait without importing domain changes.
 
-### [ ] G09 — React/Tauri workstation and manual trading
+### [ ] G09 — Native Rust terminal workstation and manual trading
 
 **Prerequisites:** G08.
 
-**Create:** design tokens, Dockview shell, typed IPC client, chart worker/adapters,
-command registry, persistence and core panels.
+**Create:** `insider-terminal`, typed authenticated IPC client, terminal-native chart
+widgets, mnemonic command registry, bounded presentation preferences, and dense
+function views.
+
+**Current implementation contract:** The terminal is a replaceable Ratatui/Crossterm
+client of `insider-runtime`. It contains no browser, WebView, Node, npm, TypeScript,
+React, or Tauri runtime. Required work includes deterministic mnemonic/function-key
+navigation; security-first symbol resolution; bounded command editing, completion,
+and session-only history; dense market/chart/depth/tape/portfolio/order/TCA/strategy/
+metric/news/risk/autonomy/alert/health/trace/research functions; terminal-native OHLCV;
+proposal-to-preview-to-confirm trading; bounded background refresh; persisted
+presentation-only preferences; and crash independence from the headless runtime.
+
+The React/Tauri implementation ledger below is retained only as migration history.
+It is superseded by this native terminal contract and MUST NOT be restored as a
+second workstation or client-side source of trading truth.
 
 **Implementation:**
 
@@ -702,12 +716,15 @@ command registry, persistence and core panels.
    `What changed since open?`, and `Analyze this region`). They only populate the normal
    input control, so analysis still requires the same explicit submit, selected-context
    hash, provider validation, TTL, and evidence-card path.
-   The Autonomy Console now renders the authoritative policy mode and risk state,
-   bounded runtime context snapshot, pending action count, model, plan validation
-   timeline, reconsider deadline, and the exact selected proposal records with
-   confidence, expiry, and rationale. It explicitly states that plan approval cannot
-   bypass portfolio, risk, execution, or reconciliation, and renders an empty state
-   when selected proposals are absent rather than inventing them.
+   The native `AUTO` function renders the authoritative policy mode and complete
+   latest plan projection: lifecycle state, generation/expiry bounds, finite selected
+   actions, proposal IDs, scale, reason codes, and strategy names resolved from live
+   proposal records. The runtime snapshot also exposes the currently installed
+   provider and configured model, explicitly labeled as current configuration rather
+   than plan-bound provenance. Reconsideration remains visibly `NOT RECORDED` because
+   the durable plan schema does not yet carry that field; the terminal does not invent
+   it from expiry. The action and rationale collections are bounded on both sides of
+   the versioned V14 IPC wire.
    The command palette now covers the remaining normative command vocabulary for
    opening autonomy, news, watchlist, and metrics panels, plus explicit manual,
    hybrid, and autonomous mode commands. Mode commands call the authenticated
@@ -1106,17 +1123,14 @@ changing serialized meaning is forbidden.
 - No silent approximation of unsupported order types or asset capabilities.
 - No LLM in the hot execution path and no direct LLM-to-broker access.
 
-## 8. UI evidence additions (2026-08-26)
+## 8. Workstation evidence additions (2026-08-26)
 
 The screener must not silently hide canonical quote records behind a fixed cap. The
-implementation derives the complete filtered/sorted result set from the runtime store,
-renders only a bounded page of 100 rows, reports `rendered/total` counts, and exposes a
-`Load next N` action until every matching record is visible. Changing the query or sort
-resets the page to 100; each load-more action is wired to a fresh render and cannot exceed
-the authoritative quote count. `ui/src/app/main.ts` contains the state and event contract,
-and `ui/src/theme/tokens.css` defines the pagination layout. Verification requires
-`npm test`, `npm run check`, and `npm run build`, plus a manual fixture with >100 quotes
-that confirms counts advance 100 at a time and that filtering/sorting resets the count.
+native terminal derives the complete filtered/sorted result set from the bounded runtime
+snapshot, reports matching/authoritative counts, and renders only visible rows. Changing
+the mode resets selection and scroll; every refresh rebuilds from the newest authoritative
+snapshot with deterministic tie breaking. Verification requires native terminal renderer,
+ranking, large-result scrolling, and live-runtime contract tests.
 
 The chart interaction contract is also explicit: pointer movement snaps the crosshair to
 the nearest candle index (`Math.round`, bounded to the active view), and a two-touch gesture
@@ -2309,3 +2323,53 @@ operator visible market state without conflating demo data with a live provider.
 GitHub issue creation is now restricted to the structured bug and feature templates
 via `.github/ISSUE_TEMPLATE/config.yml`; blank issues are disabled so safety,
 configuration, and reproducibility details cannot be silently omitted from review.
+
+## 9. Native terminal migration evidence (2026-08-31)
+
+The browser/Tauri source tree, Node/npm manifests, frontend checks, and WebView build
+surface are removed. `insider-runtime` is the headless authority and
+`insider-terminal` is the native Rust workstation over the owner-only authenticated
+Unix command transport. Closing the terminal cannot terminate autonomous execution.
+
+The command surface now provides UTF-8-safe insertion-point editing, held-key repeat,
+a 16 KiB interactive input bound, a 128-entry/256 KiB session-only history, deterministic
+function and contextual argument completion, and documented Emacs-style navigation.
+History is intentionally excluded from persisted preferences because commands can
+contain analyst questions, file paths, or operator authorization material.
+
+Security-first navigation resolves symbols through the engine instrument master rather
+than guessing in presentation state. `AAPL GP`, asset-qualified forms such as
+`ESU6 FUTURE DEPTH`, function-first `GP AAPL`, and symbol-based manual orders all use
+the same authenticated typed resolver and preserve the normal risk-preview/confirmation
+path. Ambiguous, unsupported, stale, unknown, and non-market-snapshot instruments fail
+explicitly. A live local paper-runtime check resolves AAPL to its canonical instrument
+and opens the terminal-native chart.
+
+The `AUTO` proposal table is now keyboard-selectable. Enter requests a typed risk
+preview only, while `PREVIEW <proposal-id> [scale]` supports an explicit bounded
+scale. The terminal displays the preview notional, cost, and warnings, retains the
+proposal/scale/trace binding in bounded process memory, and requires a separate
+`CONFIRM` before the engine can route the proposal through strategy, risk, execution,
+and reconciliation services. Selection alone never submits an order.
+
+The runtime capability policy grants terminal and unattended local clients the exact
+write capabilities advertised by `CONFIG LOAD`, `STRATSET`, and `METRICSET`; these
+commands no longer appear usable while being rejected at authorization. They still
+pass through versioned engine validation and never mutate terminal-local trading state.
+
+The native chart now preserves the V14 snapshot's authoritative bar start time and
+interval instead of discarding them. A bounded presentation pipeline provides
+right-anchored source-bar aggregation, CANDLE/OHLC/LINE styles, price/time axes and
+grid, keyboard crosshair with exact UTC OHLCV readout, deterministic zoom/pan/reset,
+and independently switchable SMA20, SMA50, and visible-window VWAP overlays. The
+source-bar multiplier and computed duration are labeled separately; non-monotonic
+times invalidate the time axis visibly. Chart window, aggregation, style, and overlay
+switches use the versioned bounded preference envelope, while all computations remain
+display-only and outside metric, strategy, proposal, risk, and execution state.
+
+Remaining G09 proof is intentionally open: symbol labels for every market row, linked
+multi-function workspaces/watchlists, a full proposal inspector and scheduled-execution
+controls, typed health decoding, typed strategy/order/fill/news chart annotations,
+non-blocking snapshot refresh,
+resize/performance evidence, and packaged long-duration terminal/crash tests are not
+yet complete.

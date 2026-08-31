@@ -1,4 +1,4 @@
-//! Authenticated IPC command service for the headless engine and desktop bridge.
+//! Authenticated IPC command service for the headless engine and terminal clients.
 
 #![forbid(unsafe_code)]
 
@@ -237,37 +237,40 @@ impl EngineCommandService {
             .host
             .journal_cursor()
             .map_err(|error| DispatchError::Handler(format!("state version: {error:?}")))?;
-        // Read-only clients bootstrap with version zero before their first
-        // snapshot. Treat that sentinel as "use the current cursor"; every
-        // subsequent request carries the version returned by the snapshot and
-        // remains subject to normal optimistic-concurrency checks.
+        // Observational requests do not mutate state and therefore cannot
+        // conflict with provider/scheduler journal progress. Bind them to the
+        // current cursor at dispatch time; optimistic concurrency remains
+        // mandatory for every mutating command.
         let mut command = command;
-        if command.expected_state_version == 0
-            && matches!(
-                kind,
-                SNAPSHOT
-                    | EVENTS
-                    | RESOLVE_SYMBOL
-                    | READ_MODEL_STATUS
-                    | TRACE_EVENTS
-                    | TRACE_EXPORT
-                    | NEWS_PAGE
-                    | NEWS_DETAIL
-                    | LLM_COMPLETE
-                    | LLM_ACTION
-                    | LLM_STREAM
-                    | STRATEGY_EVALUATE
-                    | PROPOSAL_PREVIEW
-                    | CONTEXT_SEARCH
-                    | EXPERIMENT_LIST
-                    | MODEL_LIST
-                    | STRATEGY_RESOLUTION_LIST
-                    | STRATEGY_EXECUTION_LIST
-                    | STRATEGY_REGISTRY_LIST
-                    | METRIC_REGISTRY_LIST
-                    | CONFIG_STATUS
-            )
-        {
+        if matches!(
+            kind,
+            SNAPSHOT
+                | EVENTS
+                | RESOLVE_SYMBOL
+                | READ_MODEL_STATUS
+                | TRACE_EVENTS
+                | TRACE_EXPORT
+                | NEWS_PAGE
+                | NEWS_DETAIL
+                | LLM_COMPLETE
+                | LLM_ACTION
+                | LLM_STREAM
+                | STRATEGY_EVALUATE
+                | PROPOSAL_PREVIEW
+                | CONTEXT_SEARCH
+                | EXPERIMENT_LIST
+                | MODEL_LIST
+                | STRATEGY_RESOLUTION_LIST
+                | STRATEGY_EXECUTION_LIST
+                | STRATEGY_REGISTRY_LIST
+                | METRIC_REGISTRY_LIST
+                | CONFIG_STATUS
+                | NEWS_PROVIDER_STATUS
+                | SUPERVISOR_STATUS
+                | RISK_POLICY_STATUS
+                | BROKER_STATUS
+                | ALERTS_GET
+        ) {
             command.expected_state_version = current;
         }
         let mut dispatcher = self
@@ -1850,6 +1853,36 @@ pub fn strategy_registry_list_command_payload() -> [u8; 1] {
     [STRATEGY_REGISTRY_LIST]
 }
 
+/// Builds a bounded read-only backtest history command.
+#[must_use]
+pub const fn backtest_list_command_payload() -> [u8; 1] {
+    [BACKTEST_LIST]
+}
+
+/// Builds a bounded read-only experiment registry command.
+#[must_use]
+pub const fn experiment_list_command_payload() -> [u8; 1] {
+    [EXPERIMENT_LIST]
+}
+
+/// Builds a bounded read-only model registry command.
+#[must_use]
+pub const fn model_list_command_payload() -> [u8; 1] {
+    [MODEL_LIST]
+}
+
+/// Builds a bounded read-only strategy-resolution history command.
+#[must_use]
+pub const fn strategy_resolution_list_command_payload() -> [u8; 1] {
+    [STRATEGY_RESOLUTION_LIST]
+}
+
+/// Builds a bounded read-only strategy execution-attribution command.
+#[must_use]
+pub const fn strategy_execution_list_command_payload() -> [u8; 1] {
+    [STRATEGY_EXECUTION_LIST]
+}
+
 /// Builds a bounded read-only metric registry command.
 #[must_use]
 pub fn metric_registry_list_command_payload() -> [u8; 1] {
@@ -2759,7 +2792,7 @@ pub fn context_search_command_payload_with_embedding(
 }
 
 /// Converts a previously returned preview wire payload into a submit payload.
-/// Native UI adapters use this to retain the exact risk-approved intent bytes;
+/// Native terminal adapters use this to retain the exact risk-approved intent bytes;
 /// they cannot invent quantities, client IDs, or warning fields at submit time.
 ///
 /// # Errors
@@ -4368,7 +4401,7 @@ fn encode_preview(preview: &ManualOrderPreview) -> Vec<u8> {
 #[allow(clippy::too_many_lines)]
 fn encode_snapshot(snapshot: &crate::RuntimeSnapshot) -> Vec<u8> {
     let mut output = Vec::new();
-    output.extend_from_slice(b"IT_RUNTIME_SNAPSHOT_V13\0");
+    output.extend_from_slice(b"IT_RUNTIME_SNAPSHOT_V14\0");
     output.extend_from_slice(&snapshot.account_id.get().to_le_bytes());
     output.extend_from_slice(&snapshot.cursor.to_le_bytes());
     output.push(match snapshot.risk_state {
@@ -4383,13 +4416,55 @@ fn encode_snapshot(snapshot: &crate::RuntimeSnapshot) -> Vec<u8> {
         insider_autonomy::Mode::Autonomous => 3,
     });
     match &snapshot.autonomy_plan {
-        Some((plan_id, state, expires_at)) => {
+        Some(plan) => {
             output.push(1);
-            push_string(&mut output, plan_id);
-            output.push(plan_state_code(*state));
-            output.extend_from_slice(&expires_at.to_le_bytes());
+            push_string(&mut output, &plan.plan_id);
+            output.push(plan_state_code(plan.state));
+            output.extend_from_slice(&plan.generated_at_ns.to_le_bytes());
+            output.extend_from_slice(&plan.expires_at_ns.to_le_bytes());
+            let actions = plan.actions.iter().take(4_096).collect::<Vec<_>>();
+            output.extend_from_slice(
+                &u16::try_from(actions.len())
+                    .unwrap_or(u16::MAX)
+                    .to_le_bytes(),
+            );
+            for action in actions {
+                output.push(match action.action_type {
+                    ActionType::ExecuteProposal => 1,
+                    ActionType::ExecuteProposalScaled => 2,
+                    ActionType::IgnoreProposal => 3,
+                    ActionType::PauseStrategy => 4,
+                    ActionType::ResumeStrategy => 5,
+                    ActionType::RequestReanalysis => 6,
+                    ActionType::AddToWatch => 7,
+                    ActionType::RemoveFromWatch => 8,
+                    ActionType::ReduceAutonomy => 9,
+                    ActionType::NoAction => 10,
+                });
+                push_string(
+                    &mut output,
+                    action.proposal_id.as_deref().unwrap_or_default(),
+                );
+                output.push(u8::from(action.scale.is_some()));
+                output.extend_from_slice(&action.scale.unwrap_or_default().to_le_bytes());
+                let reasons = action.reason_codes.iter().take(256).collect::<Vec<_>>();
+                output.extend_from_slice(
+                    &u16::try_from(reasons.len())
+                        .unwrap_or(u16::MAX)
+                        .to_le_bytes(),
+                );
+                for reason in reasons {
+                    push_string(&mut output, reason);
+                }
+            }
         }
         None => output.push(0),
+    }
+    for identity in [&snapshot.llm_provider_id, &snapshot.llm_model] {
+        output.push(u8::from(identity.is_some()));
+        if let Some(value) = identity {
+            push_string(&mut output, value);
+        }
     }
     output.extend_from_slice(&snapshot.portfolio.cash_ticks.to_le_bytes());
     output.extend_from_slice(&snapshot.portfolio.realized_pnl_ticks.to_le_bytes());

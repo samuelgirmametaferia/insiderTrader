@@ -4,6 +4,7 @@ strategy:
   entrypoint: "strategies.python.examples.threshold:evaluate"
   mode: "deterministic"
   metrics: [returns.python.v1]
+  missing_evidence: no_action
   dependencies: []
   horizon_ns: 60000000000
   ttl_ns: 5000000000

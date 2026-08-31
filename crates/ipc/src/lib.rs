@@ -108,7 +108,7 @@ pub enum AuthorizationError {
 /// In-memory least-privilege capability policy for the local command bridge.
 ///
 /// A production composition root can populate this policy from the authenticated
-/// session manager. The UI receives no capability secrets; it only receives the
+/// session manager. The terminal receives no capability secrets; it only receives the
 /// typed denial result.
 #[derive(Clone, Debug, Default)]
 pub struct CapabilityPolicy {
@@ -375,8 +375,8 @@ struct CachedCommand {
 
 /// Bounded, authorization-aware command dispatcher for local or remote transports.
 ///
-/// The dispatcher is deliberately transport-agnostic: a Unix socket, Tauri
-/// bridge, or future remote server can decode the same [`CommandEnvelope`] and
+/// The dispatcher is deliberately transport-agnostic: a Unix socket, local
+/// control-plane bridge, or future remote server can decode the same [`CommandEnvelope`] and
 /// call this boundary. Successful responses are cached by actor/idempotency key,
 /// so retries return the original result without invoking a broker twice.
 #[derive(Clone, Debug)]
@@ -649,6 +649,53 @@ pub enum UnixClientError {
     Frame(FrameError),
     /// The command or response body was malformed.
     Protocol(FrameError),
+    /// The authenticated remote command handler rejected the request.
+    Remote(String),
+}
+
+#[cfg(unix)]
+const REMOTE_ERROR_MAGIC: &[u8] = b"IT_IPC_REMOTE_ERROR_V1\0";
+#[cfg(unix)]
+const MAX_REMOTE_ERROR_BYTES: usize = 4_096;
+
+#[cfg(unix)]
+fn encode_remote_error(value: &str) -> Vec<u8> {
+    let diagnostic = if value.is_empty() || value.len() > MAX_REMOTE_ERROR_BYTES {
+        "remote command rejected; diagnostic unavailable"
+    } else {
+        value
+    };
+    let mut output = Vec::with_capacity(REMOTE_ERROR_MAGIC.len() + 2 + diagnostic.len());
+    output.extend_from_slice(REMOTE_ERROR_MAGIC);
+    let length = u16::try_from(diagnostic.len()).unwrap_or(u16::MAX);
+    output.extend_from_slice(&length.to_le_bytes());
+    output.extend_from_slice(&diagnostic.as_bytes()[..usize::from(length)]);
+    output
+}
+
+#[cfg(unix)]
+fn decode_remote_error(bytes: &[u8]) -> Result<Option<String>, FrameError> {
+    if !bytes.starts_with(REMOTE_ERROR_MAGIC) {
+        return Ok(None);
+    }
+    let payload = bytes
+        .get(REMOTE_ERROR_MAGIC.len()..)
+        .ok_or(FrameError::Incomplete)?;
+    let length_bytes = payload.get(..2).ok_or(FrameError::Incomplete)?;
+    let length = usize::from(u16::from_le_bytes([length_bytes[0], length_bytes[1]]));
+    if length == 0 || length > MAX_REMOTE_ERROR_BYTES {
+        return Err(FrameError::TooLarge(length));
+    }
+    let diagnostic = payload.get(2..).ok_or(FrameError::Incomplete)?;
+    if diagnostic.len() != length {
+        return Err(FrameError::LengthMismatch {
+            declared: length,
+            actual: diagnostic.len(),
+        });
+    }
+    String::from_utf8(diagnostic.to_vec())
+        .map(Some)
+        .map_err(|_| FrameError::Incomplete)
 }
 
 #[cfg(unix)]
@@ -793,11 +840,16 @@ impl UnixSocketServer {
             frame.extend_from_slice(&body);
             let payload = self.frame_codec.decode(&frame)?;
             let command = self.command_codec.decode(payload)?;
-            let response = handler(command).map_err(UnixServerError::Handler)?;
-            let encoded = self.response_codec.encode(&response)?;
+            let (encoded, handler_error) = match handler(command) {
+                Ok(response) => (self.response_codec.encode(&response)?, None),
+                Err(error) => (encode_remote_error(&error), Some(error)),
+            };
             let frame = self.frame_codec.encode(&encoded)?;
             stream.write_all(&frame)?;
             stream.flush()?;
+            if let Some(error) = handler_error {
+                return Err(UnixServerError::Handler(error));
+            }
         }
         Ok(())
     }
@@ -810,6 +862,7 @@ pub struct UnixSocketClient {
     command_codec: CommandCodec,
     response_codec: ResponseCodec,
     frame_codec: FrameCodec,
+    io_timeout: std::time::Duration,
 }
 
 #[cfg(unix)]
@@ -833,7 +886,30 @@ impl UnixSocketClient {
             command_codec,
             response_codec,
             frame_codec,
+            io_timeout: CONNECTION_IO_TIMEOUT,
         })
+    }
+
+    /// Applies a finite read/write deadline to every request made by this client.
+    ///
+    /// The default is [`CONNECTION_IO_TIMEOUT`]. A shorter deadline is useful for
+    /// presentation clients whose bounded worker shutdown must not depend on a
+    /// stalled peer. Zero is rejected rather than silently disabling deadlines.
+    ///
+    /// # Errors
+    /// Returns [`UnixClientError::Io`] when `timeout` is zero.
+    pub fn with_io_timeout(
+        mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Self, UnixClientError> {
+        if timeout.is_zero() {
+            return Err(UnixClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Unix client I/O timeout must be positive",
+            )));
+        }
+        self.io_timeout = timeout;
+        Ok(self)
     }
 
     /// Sends one command over a fresh owner-authenticated local connection.
@@ -845,6 +921,8 @@ impl UnixSocketClient {
     pub fn request(&self, command: &CommandEnvelope) -> Result<CommandResponse, UnixClientError> {
         use std::io::{Read, Write};
         let mut stream = std::os::unix::net::UnixStream::connect(&self.path)?;
+        stream.set_read_timeout(Some(self.io_timeout))?;
+        stream.set_write_timeout(Some(self.io_timeout))?;
         let encoded = self
             .command_codec
             .encode(command)
@@ -864,6 +942,11 @@ impl UnixSocketClient {
         response_frame.extend_from_slice(&prefix);
         response_frame.extend_from_slice(&body);
         let response_body = self.frame_codec.decode(&response_frame)?;
+        if let Some(error) =
+            decode_remote_error(response_body).map_err(UnixClientError::Protocol)?
+        {
+            return Err(UnixClientError::Remote(error));
+        }
         self.response_codec
             .decode(response_body)
             .map_err(UnixClientError::Protocol)
@@ -875,7 +958,7 @@ mod tests {
     use super::{
         AuthorizationError, CapabilityPolicy, CommandCodec, CommandDispatcher, CommandEnvelope,
         CommandResponse, DispatchError, Envelope, FrameCodec, FrameError, MessageKind,
-        RequestTracker, UnixSocketServer,
+        RequestTracker, UnixClientError, UnixServerError, UnixSocketClient, UnixSocketServer,
     };
 
     #[test]
@@ -1093,6 +1176,111 @@ mod tests {
         let server = UnixSocketServer::bind(&path, 1_024);
         assert!(server.is_ok());
         drop(server);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_server_returns_a_bounded_handler_error_to_the_client() {
+        let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "insidertrader-ipc-error-{}-{}",
+            std::process::id(),
+            elapsed.as_nanos()
+        ));
+        let Ok(server) = UnixSocketServer::bind(&path, 1_024) else {
+            return;
+        };
+        let Some(client) = UnixSocketClient::new(&path, 1_024).ok() else {
+            return;
+        };
+        let worker = std::thread::spawn(move || {
+            server.serve_next(|_| Err("preview: RiskDenied(StaleData)".into()))
+        });
+        let command = CommandEnvelope {
+            command_id: "cmd-error".into(),
+            trace_id: "trace-error".into(),
+            actor: "terminal".into(),
+            issued_wall_ns: 1,
+            expected_state_version: 0,
+            idempotency_key: "error-once".into(),
+            payload: vec![1],
+        };
+        assert!(matches!(
+            client.request(&command),
+            Err(UnixClientError::Remote(error)) if error.contains("RiskDenied(StaleData)")
+        ));
+        let joined = worker.join();
+        assert!(matches!(
+            joined,
+            Ok(Err(UnixServerError::Handler(error))) if error.contains("RiskDenied(StaleData)")
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_client_deadline_bounds_a_stalled_peer_and_rejects_zero() {
+        use std::io::Read;
+        use std::os::unix::net::UnixListener;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "insidertrader-ipc-timeout-{}-{}",
+            std::process::id(),
+            elapsed.as_nanos()
+        ));
+        let Ok(listener) = UnixListener::bind(&path) else {
+            return;
+        };
+        let (release_sender, release_receiver) = mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept()?;
+            let mut prefix = [0_u8; 4];
+            stream.read_exact(&mut prefix)?;
+            let _ = release_receiver.recv_timeout(Duration::from_secs(2));
+            Ok::<(), std::io::Error>(())
+        });
+        let Some(client) = UnixSocketClient::new(&path, 1_024).ok() else {
+            return;
+        };
+        assert!(matches!(
+            client.with_io_timeout(Duration::ZERO),
+            Err(UnixClientError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+        let Some(client) = UnixSocketClient::new(&path, 1_024).ok() else {
+            return;
+        };
+        let Ok(client) = client.with_io_timeout(Duration::from_millis(40)) else {
+            return;
+        };
+        let command = CommandEnvelope {
+            command_id: "cmd-timeout".into(),
+            trace_id: "trace-timeout".into(),
+            actor: "terminal".into(),
+            issued_wall_ns: 1,
+            expected_state_version: 0,
+            idempotency_key: "timeout-once".into(),
+            payload: vec![1],
+        };
+        let started = Instant::now();
+        assert!(matches!(
+            client.request(&command),
+            Err(UnixClientError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = release_sender.send(());
+        assert!(matches!(worker.join(), Ok(Ok(()))));
         let _ = std::fs::remove_file(path);
     }
 }

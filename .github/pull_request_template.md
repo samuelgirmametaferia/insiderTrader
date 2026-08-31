@@ -4,7 +4,7 @@ Describe the user-visible or runtime behavior changed and the owning gate from `
 
 ## Safety and configuration
 
-- [ ] No broker, risk, reconciliation, or journal authority moved into the UI/LLM.
+- [ ] No broker, risk, reconciliation, or journal authority moved into the terminal/LLM.
 - [ ] Operationally changeable values use `.cfg` (with validation and bounded defaults).
 - [ ] Secrets are absent from source, fixtures, logs, and UI persistence.
 - [ ] Replay, restart, idempotency, and failure behavior were considered.

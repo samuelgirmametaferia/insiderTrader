@@ -21,13 +21,8 @@ python3 scripts/check_licenses.py
 python3 scripts/check_security.py
 python3 scripts/check_docs.py
 python3 scripts/check_ci_contract.py
-python3 scripts/check_tauri_contract.py
-python3 scripts/check_cfg_generator.py
 python3 scripts/check_runbook.py
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 PYTHONPATH=python python3 -m unittest discover -s tests/python -p 'test_*.py'
 python3 scripts/check_requirements.py
-npm --prefix ui test
-npm --prefix ui run check
-npm --prefix ui run build

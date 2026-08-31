@@ -57,6 +57,16 @@ pub enum StrategyMode {
     Contextual,
 }
 
+/// Scheduling behavior when a declared metric snapshot is unavailable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MissingEvidencePolicy {
+    /// Do not invoke implementations that cannot safely evaluate incomplete
+    /// snapshots. This is the compatibility default for existing packages.
+    SkipEvaluation,
+    /// Invoke the strategy so it can emit an explicit, attributed `NoAction`.
+    EvaluateNoAction,
+}
+
 /// Machine-checkable strategy package contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StrategyManifest {
@@ -66,6 +76,8 @@ pub struct StrategyManifest {
     pub mode: StrategyMode,
     /// Exact metric IDs consumed by the strategy.
     pub metric_ids: Vec<String>,
+    /// Behavior when one of the declared metrics is absent or stale.
+    pub missing_evidence: MissingEvidencePolicy,
     /// Strategy IDs whose outputs this strategy consumes.
     pub strategy_dependencies: Vec<String>,
     /// Decision horizon in nanoseconds.
@@ -214,6 +226,7 @@ pub trait Strategy: Send + Sync {
             strategy_id: self.strategy_id().to_owned(),
             mode: StrategyMode::Deterministic,
             metric_ids: Vec::new(),
+            missing_evidence: MissingEvidencePolicy::SkipEvaluation,
             strategy_dependencies: Vec::new(),
             period_ns: 1,
             deadline_ns: 1,
@@ -321,6 +334,7 @@ impl Strategy for ThresholdStrategy {
             strategy_id: self.strategy_id.clone(),
             mode: StrategyMode::Deterministic,
             metric_ids: vec![self.metric_id.clone()],
+            missing_evidence: MissingEvidencePolicy::EvaluateNoAction,
             strategy_dependencies: Vec::new(),
             period_ns: self.ttl_ns,
             deadline_ns: self.ttl_ns,
@@ -384,13 +398,367 @@ impl Strategy for ThresholdStrategy {
     }
 }
 
+/// Typed reasons emitted by the conservative starter trend strategy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrendRationale {
+    /// One or more declared metric snapshots were missing, stale, or for a
+    /// different instrument.
+    MissingOrStaleEvidence,
+    /// Metric warm-up confidence has not reached the configured threshold.
+    EvidenceWarmingUp,
+    /// A metric violated its declared finite/range semantics.
+    InvalidEvidence,
+    /// Current relative spread exceeds the strategy's liquidity guard.
+    SpreadGuard,
+    /// Trend magnitude is below the entry threshold.
+    TrendBelowEntry,
+    /// Trend magnitude is within the explicit close band.
+    TrendNeutral,
+    /// Positive trend passed evidence and liquidity checks.
+    LongTrend,
+    /// Negative trend passed evidence and liquidity checks.
+    ShortTrend,
+    /// Target quantity was reduced to the configured volatility budget.
+    VolatilityScaled,
+    /// Volatility scaling reduced the target below one canonical quantity tick.
+    RiskBudgetTooSmall,
+}
+
+impl TrendRationale {
+    /// Stable code recorded in proposal evidence and journals.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingOrStaleEvidence => "MISSING_OR_STALE_EVIDENCE",
+            Self::EvidenceWarmingUp => "EVIDENCE_WARMING_UP",
+            Self::InvalidEvidence => "INVALID_EVIDENCE",
+            Self::SpreadGuard => "SPREAD_GUARD",
+            Self::TrendBelowEntry => "TREND_BELOW_ENTRY",
+            Self::TrendNeutral => "TREND_NEUTRAL",
+            Self::LongTrend => "LONG_TREND",
+            Self::ShortTrend => "SHORT_TREND",
+            Self::VolatilityScaled => "VOLATILITY_SCALED",
+            Self::RiskBudgetTooSmall => "RISK_BUDGET_TOO_SMALL",
+        }
+    }
+}
+
+/// Immutable configuration for [`VolatilityScaledTrendStrategy`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct VolatilityScaledTrendConfig {
+    /// Immutable strategy identity including version.
+    pub strategy_id: String,
+    /// Normalized fast/slow trend metric identity.
+    pub trend_metric_id: String,
+    /// Normalized realized-volatility/ATR metric identity.
+    pub volatility_metric_id: String,
+    /// Relative bid/ask spread metric identity.
+    pub spread_metric_id: String,
+    /// Absolute normalized trend required to open a target.
+    pub entry_threshold: f64,
+    /// Absolute normalized trend at or below which exposure should close.
+    pub exit_threshold: f64,
+    /// Maximum accepted relative bid/ask spread.
+    pub max_spread: f64,
+    /// Normalized volatility budget used to scale target quantity.
+    pub target_volatility: f64,
+    /// Minimum adjusted confidence required from every metric.
+    pub min_confidence: f64,
+    /// Maximum absolute target in canonical quantity ticks.
+    pub base_quantity_ticks: i64,
+    /// Expected holding horizon.
+    pub horizon_ns: u64,
+    /// Proposal freshness TTL.
+    pub ttl_ns: u64,
+}
+
+/// Deterministic cross-asset starter strategy combining trend, volatility, and
+/// liquidity evidence.
+///
+/// It emits absolute target quantities only. It never constructs or submits a
+/// broker order, and it explicitly abstains while evidence is stale or warming
+/// up.
+pub struct VolatilityScaledTrendStrategy {
+    config: VolatilityScaledTrendConfig,
+    base_quantity_ticks: u32,
+    next_proposal: AtomicU64,
+}
+
+impl VolatilityScaledTrendStrategy {
+    /// Builds a strategy with a deterministic proposal sequence starting at 1.
+    #[must_use]
+    pub fn new(config: VolatilityScaledTrendConfig) -> Option<Self> {
+        Self::new_with_proposal_seed(config, 1)
+    }
+
+    /// Builds a strategy with an explicit deterministic live/replay sequence.
+    ///
+    /// The strategy host serializes evaluation of an instance. Given the same
+    /// ordered trigger tape and seed, live and replay therefore assign the
+    /// same proposal IDs. Concurrent callers outside that host still receive
+    /// unique IDs, but their relative ID assignment is intentionally not an
+    /// ordering contract.
+    #[must_use]
+    pub fn new_with_proposal_seed(
+        config: VolatilityScaledTrendConfig,
+        proposal_seed: u64,
+    ) -> Option<Self> {
+        let ids = [
+            config.strategy_id.as_str(),
+            config.trend_metric_id.as_str(),
+            config.volatility_metric_id.as_str(),
+            config.spread_metric_id.as_str(),
+        ];
+        let unique_metrics = std::collections::BTreeSet::from([
+            config.trend_metric_id.as_str(),
+            config.volatility_metric_id.as_str(),
+            config.spread_metric_id.as_str(),
+        ]);
+        let base_quantity_ticks = u32::try_from(config.base_quantity_ticks.checked_abs()?).ok()?;
+        if proposal_seed == 0
+            || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
+            || unique_metrics.len() != 3
+            || !config.entry_threshold.is_finite()
+            || !config.exit_threshold.is_finite()
+            || !config.max_spread.is_finite()
+            || !config.target_volatility.is_finite()
+            || !config.min_confidence.is_finite()
+            || !(0.0..=1.0).contains(&config.entry_threshold)
+            || config.entry_threshold <= config.exit_threshold
+            || config.exit_threshold < 0.0
+            || !(0.0..=1.0).contains(&config.max_spread)
+            || config.max_spread == 0.0
+            || !(0.0..=1.0).contains(&config.target_volatility)
+            || config.target_volatility == 0.0
+            || !(0.0..=1.0).contains(&config.min_confidence)
+            || base_quantity_ticks == 0
+            || config.horizon_ns == 0
+            || config.ttl_ns == 0
+            || config.ttl_ns > config.horizon_ns.saturating_mul(10)
+        {
+            return None;
+        }
+        Some(Self {
+            config,
+            base_quantity_ticks,
+            next_proposal: AtomicU64::new(proposal_seed),
+        })
+    }
+
+    fn proposal(
+        &self,
+        context: &StrategyContext<'_>,
+        action: Action,
+        confidence: f64,
+        evidence: Vec<String>,
+    ) -> Result<Proposal, ProposalError> {
+        let proposal_id = ProposalId::new(u128::from(
+            self.next_proposal.fetch_add(1, Ordering::Relaxed),
+        ))
+        .map_err(|_| ProposalError::MissingIdentity)?;
+        let proposal = Proposal {
+            proposal_id,
+            strategy_id: self.config.strategy_id.clone(),
+            instrument_id: context.instrument_id,
+            action,
+            confidence,
+            horizon_ns: self.config.horizon_ns,
+            ttl_ns: self.config.ttl_ns,
+            evidence,
+            generated_mono: context.now,
+        };
+        proposal.validate(context.now).map(|()| proposal)
+    }
+
+    fn rationale(code: TrendRationale) -> String {
+        format!("rationale:{}", code.code())
+    }
+
+    fn metric_evidence(metric: &MetricOutput) -> String {
+        format!(
+            "metric:{}:mono={}:score={:016x}:confidence={:016x}:uncertainty={:016x}",
+            metric.metric_id,
+            metric.generated_mono.as_nanos(),
+            metric.score.to_bits(),
+            metric.confidence.to_bits(),
+            metric.uncertainty.to_bits()
+        )
+    }
+
+    fn find_metric<'a>(
+        context: &'a StrategyContext<'_>,
+        metric_id: &str,
+    ) -> Option<&'a MetricOutput> {
+        let mut matches = context.metrics.iter().filter(|metric| {
+            metric.metric_id == metric_id
+                && metric.instrument_id == context.instrument_id
+                && metric.is_fresh(context.now)
+        });
+        let metric = matches.next()?;
+        matches.next().is_none().then_some(metric)
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn scaled_quantity(base_quantity_ticks: u32, scale: f64) -> Option<i64> {
+        if !scale.is_finite() || !(0.0..=1.0).contains(&scale) {
+            return None;
+        }
+        let scaled = (f64::from(base_quantity_ticks) * scale).floor();
+        if !(0.0..=f64::from(base_quantity_ticks)).contains(&scaled) {
+            return None;
+        }
+        // The range check plus the u32-sized input make this conversion exact
+        // with respect to the strategy's canonical whole-tick output domain.
+        Some(i64::from(scaled as u32))
+    }
+}
+
+impl Strategy for VolatilityScaledTrendStrategy {
+    fn strategy_id(&self) -> &str {
+        &self.config.strategy_id
+    }
+
+    fn manifest(&self) -> StrategyManifest {
+        StrategyManifest {
+            strategy_id: self.config.strategy_id.clone(),
+            mode: StrategyMode::Deterministic,
+            metric_ids: vec![
+                self.config.trend_metric_id.clone(),
+                self.config.volatility_metric_id.clone(),
+                self.config.spread_metric_id.clone(),
+            ],
+            missing_evidence: MissingEvidencePolicy::EvaluateNoAction,
+            strategy_dependencies: Vec::new(),
+            horizon_ns: self.config.horizon_ns,
+            ttl_ns: self.config.ttl_ns,
+            period_ns: self.config.ttl_ns,
+            deadline_ns: self.config.ttl_ns.min(10_000_000),
+            priority: StrategyPriority::Fast,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn evaluate(&self, context: &StrategyContext<'_>) -> Result<Proposal, ProposalError> {
+        let Some(trend) = Self::find_metric(context, &self.config.trend_metric_id) else {
+            return self.proposal(
+                context,
+                Action::NoAction,
+                0.0,
+                vec![
+                    Self::rationale(TrendRationale::MissingOrStaleEvidence),
+                    format!("metric:{}:stale-or-missing", self.config.trend_metric_id),
+                ],
+            );
+        };
+        let Some(volatility) = Self::find_metric(context, &self.config.volatility_metric_id) else {
+            return self.proposal(
+                context,
+                Action::NoAction,
+                0.0,
+                vec![
+                    Self::rationale(TrendRationale::MissingOrStaleEvidence),
+                    format!(
+                        "metric:{}:stale-or-missing",
+                        self.config.volatility_metric_id
+                    ),
+                ],
+            );
+        };
+        let Some(spread) = Self::find_metric(context, &self.config.spread_metric_id) else {
+            return self.proposal(
+                context,
+                Action::NoAction,
+                0.0,
+                vec![
+                    Self::rationale(TrendRationale::MissingOrStaleEvidence),
+                    format!("metric:{}:stale-or-missing", self.config.spread_metric_id),
+                ],
+            );
+        };
+        let metrics = [trend, volatility, spread];
+        let valid = metrics.iter().all(|metric| {
+            metric.score.is_finite()
+                && metric.confidence.is_finite()
+                && metric.uncertainty.is_finite()
+                && (0.0..=1.0).contains(&metric.confidence)
+                && metric.uncertainty >= 0.0
+        }) && (-1.0..=1.0).contains(&trend.score)
+            && volatility.score >= 0.0
+            && spread.score >= 0.0;
+        let mut evidence = metrics
+            .iter()
+            .map(|metric| Self::metric_evidence(metric))
+            .collect::<Vec<_>>();
+        if !valid {
+            evidence.push(Self::rationale(TrendRationale::InvalidEvidence));
+            return self.proposal(context, Action::NoAction, 0.0, evidence);
+        }
+        let adjusted_confidence = metrics
+            .iter()
+            .map(|metric| metric.confidence / (1.0 + metric.uncertainty))
+            .fold(1.0_f64, f64::min)
+            .clamp(0.0, 1.0);
+        if adjusted_confidence < self.config.min_confidence {
+            evidence.push(Self::rationale(TrendRationale::EvidenceWarmingUp));
+            return self.proposal(context, Action::NoAction, adjusted_confidence, evidence);
+        }
+        if spread.score > self.config.max_spread {
+            evidence.push(Self::rationale(TrendRationale::SpreadGuard));
+            return self.proposal(context, Action::NoAction, adjusted_confidence, evidence);
+        }
+        let trend_magnitude = trend.score.abs();
+        if trend_magnitude <= self.config.exit_threshold {
+            evidence.push(Self::rationale(TrendRationale::TrendNeutral));
+            return self.proposal(context, Action::Close, adjusted_confidence, evidence);
+        }
+        if trend_magnitude < self.config.entry_threshold {
+            evidence.push(Self::rationale(TrendRationale::TrendBelowEntry));
+            return self.proposal(context, Action::NoAction, adjusted_confidence, evidence);
+        }
+        let scale = if volatility.score <= self.config.target_volatility {
+            1.0
+        } else {
+            self.config.target_volatility / volatility.score
+        };
+        let quantity = Self::scaled_quantity(self.base_quantity_ticks, scale)
+            .ok_or(ProposalError::InvalidAction)?;
+        if quantity == 0 {
+            evidence.push(Self::rationale(TrendRationale::RiskBudgetTooSmall));
+            return self.proposal(context, Action::NoAction, adjusted_confidence, evidence);
+        }
+        let (target, direction) = if trend.score.is_sign_positive() {
+            (quantity, TrendRationale::LongTrend)
+        } else {
+            (
+                quantity.checked_neg().ok_or(ProposalError::InvalidAction)?,
+                TrendRationale::ShortTrend,
+            )
+        };
+        evidence.push(Self::rationale(direction));
+        if scale < 1.0 {
+            evidence.push(Self::rationale(TrendRationale::VolatilityScaled));
+        }
+        self.proposal(
+            context,
+            Action::TargetQuantity {
+                quantity_ticks: target,
+            },
+            adjusted_confidence,
+            evidence,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use insider_common_types::{InstrumentId, MonoTime, ProposalId};
 
     use insider_metric_sdk::MetricOutput;
 
-    use super::{Action, Proposal, ProposalError, Strategy, StrategyContext, ThresholdStrategy};
+    use super::{
+        Action, Proposal, ProposalError, Strategy, StrategyContext, ThresholdStrategy,
+        TrendRationale, VolatilityScaledTrendConfig, VolatilityScaledTrendStrategy,
+    };
 
     fn proposal(action: Action) -> Option<Proposal> {
         Some(Proposal {
@@ -481,5 +849,193 @@ mod tests {
                     .iter()
                     .any(|item| item.contains("stale-or-missing"))
         }));
+    }
+
+    fn starter_config() -> VolatilityScaledTrendConfig {
+        VolatilityScaledTrendConfig {
+            strategy_id: String::from("cross_asset.volatility_scaled_trend.v1"),
+            trend_metric_id: String::from("trend.v1"),
+            volatility_metric_id: String::from("atr.v1"),
+            spread_metric_id: String::from("spread.v1"),
+            entry_threshold: 0.01,
+            exit_threshold: 0.002,
+            max_spread: 0.005,
+            target_volatility: 0.015,
+            min_confidence: 0.65,
+            base_quantity_ticks: 10,
+            horizon_ns: 1_000,
+            ttl_ns: 100,
+        }
+    }
+
+    fn metric(
+        id: &str,
+        instrument_id: InstrumentId,
+        score: f64,
+        confidence: f64,
+        uncertainty: f64,
+        generated_mono: u64,
+        ttl_ns: u64,
+    ) -> MetricOutput {
+        MetricOutput {
+            metric_id: id.to_owned(),
+            instrument_id,
+            generated_mono: MonoTime::from_nanos(generated_mono),
+            ttl_ns,
+            score,
+            confidence,
+            uncertainty,
+        }
+    }
+
+    #[test]
+    fn volatility_scaled_trend_emits_bounded_target_with_typed_evidence() {
+        let Some(instrument) = InstrumentId::new(9).ok() else {
+            return;
+        };
+        let Some(strategy) = VolatilityScaledTrendStrategy::new(starter_config()) else {
+            return;
+        };
+        let metrics = [
+            metric("trend.v1", instrument, 0.02, 1.0, 0.0, 10, 100),
+            metric("atr.v1", instrument, 0.03, 1.0, 0.0, 10, 100),
+            metric("spread.v1", instrument, 0.001, 1.0, 0.0, 10, 100),
+        ];
+        let Ok(proposal) = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(20),
+            instrument_id: instrument,
+            metrics: &metrics,
+        }) else {
+            return;
+        };
+        assert_eq!(
+            proposal.action,
+            Action::TargetQuantity { quantity_ticks: 5 }
+        );
+        assert!(
+            proposal
+                .evidence
+                .iter()
+                .any(|item| item == &format!("rationale:{}", TrendRationale::LongTrend.code()))
+        );
+        assert!(proposal.evidence.iter().any(|item| {
+            item == &format!("rationale:{}", TrendRationale::VolatilityScaled.code())
+        }));
+        assert_eq!(strategy.manifest().metric_ids.len(), 3);
+    }
+
+    #[test]
+    fn starter_strategy_abstains_for_stale_duplicate_warming_and_wide_evidence() {
+        let Some(instrument) = InstrumentId::new(10).ok() else {
+            return;
+        };
+        let Some(strategy) = VolatilityScaledTrendStrategy::new(starter_config()) else {
+            return;
+        };
+        let base = [
+            metric("trend.v1", instrument, 0.02, 1.0, 0.0, 10, 10),
+            metric("atr.v1", instrument, 0.01, 1.0, 0.0, 10, 10),
+            metric("spread.v1", instrument, 0.001, 1.0, 0.0, 10, 10),
+        ];
+        let at_boundary = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(20),
+            instrument_id: instrument,
+            metrics: &base,
+        });
+        assert!(
+            at_boundary
+                .is_ok_and(|proposal| matches!(proposal.action, Action::TargetQuantity { .. }))
+        );
+        let stale = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(21),
+            instrument_id: instrument,
+            metrics: &base,
+        });
+        assert!(stale.is_ok_and(|proposal| {
+            matches!(proposal.action, Action::NoAction)
+                && proposal.evidence.iter().any(|item| {
+                    item == &format!(
+                        "rationale:{}",
+                        TrendRationale::MissingOrStaleEvidence.code()
+                    )
+                })
+        }));
+
+        let duplicates = [
+            metric("trend.v1", instrument, 0.02, 1.0, 0.0, 20, 100),
+            metric("trend.v1", instrument, 0.03, 1.0, 0.0, 20, 100),
+            metric("atr.v1", instrument, 0.01, 1.0, 0.0, 20, 100),
+            metric("spread.v1", instrument, 0.001, 1.0, 0.0, 20, 100),
+        ];
+        let duplicate = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(21),
+            instrument_id: instrument,
+            metrics: &duplicates,
+        });
+        assert!(duplicate.is_ok_and(|proposal| matches!(proposal.action, Action::NoAction)));
+
+        let warming = [
+            metric("trend.v1", instrument, 0.02, 0.5, 0.0, 20, 100),
+            metric("atr.v1", instrument, 0.01, 1.0, 0.0, 20, 100),
+            metric("spread.v1", instrument, 0.001, 1.0, 0.0, 20, 100),
+        ];
+        let warming = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(21),
+            instrument_id: instrument,
+            metrics: &warming,
+        });
+        assert!(warming.is_ok_and(|proposal| {
+            matches!(proposal.action, Action::NoAction)
+                && proposal.evidence.iter().any(|item| {
+                    item == &format!("rationale:{}", TrendRationale::EvidenceWarmingUp.code())
+                })
+        }));
+
+        let wide = [
+            metric("trend.v1", instrument, 0.02, 1.0, 0.0, 20, 100),
+            metric("atr.v1", instrument, 0.01, 1.0, 0.0, 20, 100),
+            metric("spread.v1", instrument, 0.006, 1.0, 0.0, 20, 100),
+        ];
+        let wide = strategy.evaluate(&StrategyContext {
+            now: MonoTime::from_nanos(21),
+            instrument_id: instrument,
+            metrics: &wide,
+        });
+        assert!(wide.is_ok_and(|proposal| {
+            matches!(proposal.action, Action::NoAction)
+                && proposal.evidence.iter().any(|item| {
+                    item == &format!("rationale:{}", TrendRationale::SpreadGuard.code())
+                })
+        }));
+    }
+
+    #[test]
+    fn starter_strategy_replay_is_identical_for_same_ordered_trigger_tape() {
+        let Some(instrument) = InstrumentId::new(12).ok() else {
+            return;
+        };
+        let Some(live) =
+            VolatilityScaledTrendStrategy::new_with_proposal_seed(starter_config(), 41)
+        else {
+            return;
+        };
+        let Some(replay) =
+            VolatilityScaledTrendStrategy::new_with_proposal_seed(starter_config(), 41)
+        else {
+            return;
+        };
+        for now in [20, 30, 40] {
+            let metrics = [
+                metric("trend.v1", instrument, -0.02, 0.9, 0.01, now, 100),
+                metric("atr.v1", instrument, 0.01, 0.9, 0.01, now, 100),
+                metric("spread.v1", instrument, 0.001, 1.0, 0.0, now, 100),
+            ];
+            let context = StrategyContext {
+                now: MonoTime::from_nanos(now),
+                instrument_id: instrument,
+                metrics: &metrics,
+            };
+            assert_eq!(live.evaluate(&context), replay.evaluate(&context));
+        }
     }
 }

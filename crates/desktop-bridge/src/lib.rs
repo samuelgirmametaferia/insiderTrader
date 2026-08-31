@@ -1,6 +1,6 @@
-//! Native desktop/headless bridge for the authenticated engine command service.
+//! Native control-plane bridge for the authenticated engine command service.
 //!
-//! Tauri commands and unattended local clients use the same Unix transport;
+//! Terminal and unattended local clients use the same Unix transport;
 //! this crate contains no trading logic and cannot bypass engine validation.
 
 #![forbid(unsafe_code)]
@@ -20,14 +20,14 @@ pub enum BridgeError {
 
 /// Bounded native bridge serving one authenticated engine service.
 #[cfg(unix)]
-pub struct DesktopBridge {
+pub struct ControlPlaneBridge {
     server: UnixSocketServer,
     service: Arc<EngineCommandService>,
 }
 
 #[cfg(unix)]
-impl DesktopBridge {
-    /// Binds an owner-only Unix socket for the desktop shell.
+impl ControlPlaneBridge {
+    /// Binds an owner-only Unix socket for local terminal clients.
     ///
     /// # Errors
     /// Returns [`BridgeError::Transport`] when the socket cannot be bound.
@@ -57,8 +57,7 @@ impl DesktopBridge {
     }
 }
 
-/// Converts a command response into an owned payload for embedding in a native
-/// Tauri command result without exposing engine internals.
+/// Converts a command response into an owned payload for native clients.
 #[must_use]
 pub fn response_parts(response: CommandResponse) -> (u64, Vec<u8>) {
     (response.state_version, response.payload)

@@ -1,4 +1,4 @@
-//! Headless paper-mode composition root for the desktop command bridge.
+//! Headless paper/live composition root for the terminal control plane.
 
 #![forbid(unsafe_code)]
 
@@ -24,12 +24,16 @@ use insider_llm_core::{
 };
 use insider_market_data::{MarketEvent, Quote};
 use insider_market_providers::{
+    BinanceChartConfig, BinanceChartProvider, BinanceQuoteConfig, BinanceQuoteProvider,
     ReqwestHttpTransport as MarketReqwestTransport, YahooChartConfig, YahooChartProvider,
     YahooQuoteConfig, YahooQuoteProvider,
 };
 use insider_market_types::{AssetClass, Contract, Instrument, InstrumentSpec};
 use insider_metric_host::discover_metric_packages;
-use insider_metric_sdk::{BookImbalanceMetric, EwmaVolatility, SimpleMovingAverage, SpreadMetric};
+use insider_metric_sdk::{
+    BookImbalanceMetric, EwmaVolatility, NormalizedAverageTrueRange, NormalizedEmaTrend,
+    SimpleMovingAverage, SpreadMetric,
+};
 use insider_news_core::{CursorProvider, RetryPolicy};
 use insider_news_providers::{
     NewsApiProvider, NewsApiTopHeadlinesProvider, ReqwestHttpTransport, YahooFinanceNewsProvider,
@@ -38,14 +42,16 @@ use insider_news_providers::{
 use insider_portfolio::{Portfolio, Position};
 use insider_risk_engine::{Limits, RiskEngine};
 use insider_strategy_host::discover_strategy_packages;
-use insider_strategy_sdk::ThresholdStrategy;
+use insider_strategy_sdk::{
+    ThresholdStrategy, VolatilityScaledTrendConfig, VolatilityScaledTrendStrategy,
+};
 use reqwest::blocking::Client;
 
-use insider_desktop_bridge::DesktopBridge;
+use insider_runtime::ControlPlaneBridge;
 
 fn usage() {
     eprintln!(
-        "usage: insider-desktop-bridge serve --journal PATH --socket PATH [--config PATH] [--account ID] \\
+        "usage: insider-runtime serve --journal PATH --socket PATH [--config PATH] [--account ID] \\
          [--check] [--instrument ID --symbol SYMBOL --price TICKS]"
     );
 }
@@ -511,6 +517,68 @@ fn register_reference_metrics(host: &Arc<ServiceHost>, settings: &Settings) -> R
     .map_err(|error| format!("book-imbalance metric configuration: {error:?}"))?;
     host.register_metric(Arc::new(imbalance))
         .map_err(|error| format!("register book-imbalance metric: {error:?}"))?;
+    register_starter_metrics(host, settings, metric_ttl_ns)
+}
+
+fn register_starter_metrics(
+    host: &Arc<ServiceHost>,
+    settings: &Settings,
+    metric_ttl_ns: u64,
+) -> Result<(), String> {
+    let trend_fast_window = usize::try_from(configured_u64(
+        settings,
+        "metric.trend_fast_window",
+        "IT_TREND_FAST_WINDOW",
+        8,
+        1,
+        4_095,
+    )?)
+    .map_err(|_| "metric.trend_fast_window exceeds platform bounds".to_owned())?;
+    let trend_slow_window = usize::try_from(configured_u64(
+        settings,
+        "metric.trend_slow_window",
+        "IT_TREND_SLOW_WINDOW",
+        21,
+        2,
+        4_096,
+    )?)
+    .map_err(|_| "metric.trend_slow_window exceeds platform bounds".to_owned())?;
+    let trend = NormalizedEmaTrend::new(
+        configured_string(
+            settings,
+            "metric.trend_id",
+            "IT_TREND_METRIC_ID",
+            "trend.ema.normalized.v1",
+        )?,
+        trend_fast_window,
+        trend_slow_window,
+        metric_ttl_ns,
+    )
+    .map_err(|error| format!("normalized EMA trend metric configuration: {error:?}"))?;
+    host.register_metric(Arc::new(trend))
+        .map_err(|error| format!("register normalized EMA trend metric: {error:?}"))?;
+    let atr_window = usize::try_from(configured_u64(
+        settings,
+        "metric.atr_window",
+        "IT_ATR_WINDOW",
+        14,
+        1,
+        4_096,
+    )?)
+    .map_err(|_| "metric.atr_window exceeds platform bounds".to_owned())?;
+    let atr = NormalizedAverageTrueRange::new(
+        configured_string(
+            settings,
+            "metric.atr_id",
+            "IT_ATR_METRIC_ID",
+            "volatility.atr.normalized.v1",
+        )?,
+        atr_window,
+        metric_ttl_ns,
+    )
+    .map_err(|error| format!("normalized ATR metric configuration: {error:?}"))?;
+    host.register_metric(Arc::new(atr))
+        .map_err(|error| format!("register normalized ATR metric: {error:?}"))?;
     Ok(())
 }
 
@@ -550,71 +618,169 @@ fn configure_context_embeddings(
 }
 
 fn register_reference_strategy(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
-    if !configured_bool(
+    register_threshold_strategy(host, settings)?;
+    register_starter_strategy(host, settings)
+}
+
+fn register_threshold_strategy(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
+    if configured_bool(
         settings,
         "strategy.reference_enabled",
         "IT_ENABLE_REFERENCE_STRATEGY",
         false,
     )? {
-        return Ok(());
+        let strategy = ThresholdStrategy::new(
+            configured_string(
+                settings,
+                "strategy.reference_id",
+                "IT_REFERENCE_STRATEGY_ID",
+                "microstructure.imbalance.threshold.v1",
+            )?,
+            configured_string(
+                settings,
+                "strategy.reference_metric_id",
+                "IT_IMBALANCE_METRIC_ID",
+                "microstructure.imbalance.v1",
+            )?,
+            configured_f64(
+                settings,
+                "strategy.reference_entry_threshold",
+                "IT_REFERENCE_ENTRY_THRESHOLD",
+                0.5,
+            )?,
+            configured_f64(
+                settings,
+                "strategy.reference_exit_threshold",
+                "IT_REFERENCE_EXIT_THRESHOLD",
+                0.1,
+            )?,
+            configured_positive_i64_setting(
+                settings,
+                "strategy.reference_quantity_ticks",
+                "IT_REFERENCE_QUANTITY_TICKS",
+                1,
+            )?,
+            configured_u64(
+                settings,
+                "strategy.reference_horizon_ns",
+                "IT_REFERENCE_HORIZON_NS",
+                900_000_000_000,
+                1,
+                86_400_000_000_000,
+            )?,
+            configured_u64(
+                settings,
+                "strategy.reference_ttl_ns",
+                "IT_REFERENCE_STRATEGY_TTL_NS",
+                5_000_000_000,
+                1,
+                86_400_000_000_000,
+            )?,
+        )
+        .ok_or_else(|| "reference strategy configuration is invalid".to_owned())?;
+        host.register_strategy(Arc::new(strategy))
+            .map_err(|error| format!("register reference strategy: {error:?}"))?;
     }
-    let strategy = ThresholdStrategy::new(
-        configured_string(
-            settings,
-            "strategy.reference_id",
-            "IT_REFERENCE_STRATEGY_ID",
-            "microstructure.imbalance.threshold.v1",
-        )?,
-        configured_string(
-            settings,
-            "strategy.reference_metric_id",
-            "IT_IMBALANCE_METRIC_ID",
-            "microstructure.imbalance.v1",
-        )?,
-        configured_f64(
-            settings,
-            "strategy.reference_entry_threshold",
-            "IT_REFERENCE_ENTRY_THRESHOLD",
-            0.5,
-        )?,
-        configured_f64(
-            settings,
-            "strategy.reference_exit_threshold",
-            "IT_REFERENCE_EXIT_THRESHOLD",
-            0.1,
-        )?,
-        configured_positive_i64_setting(
-            settings,
-            "strategy.reference_quantity_ticks",
-            "IT_REFERENCE_QUANTITY_TICKS",
-            1,
-        )?,
-        configured_u64(
-            settings,
-            "strategy.reference_horizon_ns",
-            "IT_REFERENCE_HORIZON_NS",
-            900_000_000_000,
-            1,
-            86_400_000_000_000,
-        )?,
-        configured_u64(
-            settings,
-            "strategy.reference_ttl_ns",
-            "IT_REFERENCE_STRATEGY_TTL_NS",
-            5_000_000_000,
-            1,
-            86_400_000_000_000,
-        )?,
-    )
-    .ok_or_else(|| "reference strategy configuration is invalid".to_owned())?;
-    host.register_strategy(Arc::new(strategy))
-        .map_err(|error| format!("register reference strategy: {error:?}"))
+    Ok(())
 }
 
-/// Runs discovered workers on a bounded wall-clock cadence. The engine owns
-/// monotonic decision timestamps and proposal admission; this thread only
-/// wakes the cycle and reports worker degradation.
-fn start_python_scheduler(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
+fn register_starter_strategy(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
+    if configured_bool(
+        settings,
+        "strategy.starter_enabled",
+        "IT_ENABLE_STARTER_STRATEGY",
+        false,
+    )? {
+        let strategy = VolatilityScaledTrendStrategy::new(VolatilityScaledTrendConfig {
+            strategy_id: configured_string(
+                settings,
+                "strategy.starter_id",
+                "IT_STARTER_STRATEGY_ID",
+                "cross_asset.volatility_scaled_trend.v1",
+            )?,
+            trend_metric_id: configured_string(
+                settings,
+                "strategy.starter_trend_metric_id",
+                "IT_TREND_METRIC_ID",
+                "trend.ema.normalized.v1",
+            )?,
+            volatility_metric_id: configured_string(
+                settings,
+                "strategy.starter_volatility_metric_id",
+                "IT_ATR_METRIC_ID",
+                "volatility.atr.normalized.v1",
+            )?,
+            spread_metric_id: configured_string(
+                settings,
+                "strategy.starter_spread_metric_id",
+                "IT_SPREAD_METRIC_ID",
+                "liquidity.spread.v1",
+            )?,
+            entry_threshold: configured_f64(
+                settings,
+                "strategy.starter_entry_threshold",
+                "IT_STARTER_ENTRY_THRESHOLD",
+                0.002,
+            )?,
+            exit_threshold: configured_f64(
+                settings,
+                "strategy.starter_exit_threshold",
+                "IT_STARTER_EXIT_THRESHOLD",
+                0.0005,
+            )?,
+            max_spread: configured_f64(
+                settings,
+                "strategy.starter_max_spread",
+                "IT_STARTER_MAX_SPREAD",
+                0.0025,
+            )?,
+            target_volatility: configured_f64(
+                settings,
+                "strategy.starter_target_volatility",
+                "IT_STARTER_TARGET_VOLATILITY",
+                0.015,
+            )?,
+            min_confidence: configured_f64(
+                settings,
+                "strategy.starter_min_confidence",
+                "IT_STARTER_MIN_CONFIDENCE",
+                0.65,
+            )?,
+            base_quantity_ticks: configured_positive_i64_setting(
+                settings,
+                "strategy.starter_quantity_ticks",
+                "IT_STARTER_QUANTITY_TICKS",
+                10,
+            )?,
+            horizon_ns: configured_u64(
+                settings,
+                "strategy.starter_horizon_ns",
+                "IT_STARTER_HORIZON_NS",
+                900_000_000_000,
+                1,
+                86_400_000_000_000,
+            )?,
+            ttl_ns: configured_u64(
+                settings,
+                "strategy.starter_ttl_ns",
+                "IT_STARTER_STRATEGY_TTL_NS",
+                5_000_000_000,
+                1,
+                86_400_000_000_000,
+            )?,
+        })
+        .ok_or_else(|| "starter strategy configuration is invalid".to_owned())?;
+        host.register_strategy(Arc::new(strategy))
+            .map_err(|error| format!("register starter strategy: {error:?}"))?;
+    }
+    Ok(())
+}
+
+/// Runs registered Rust and optional Python metrics/strategies on a bounded
+/// wall-clock cadence. The engine owns monotonic decision timestamps and
+/// proposal admission; this thread only wakes the cycle and reports worker
+/// degradation.
+fn start_decision_scheduler(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
     let interval_ms = configured_u64(
         settings,
         "scheduler.python_cycle_ms",
@@ -634,7 +800,7 @@ fn start_python_scheduler(host: &Arc<ServiceHost>, settings: &Settings) -> Resul
     )?
     .saturating_mul(1_000_000);
     std::thread::Builder::new()
-        .name("python-decision-cycle".into())
+        .name("metric-strategy-decision-cycle".into())
         .spawn(move || {
             loop {
                 if let Err(error) =
@@ -643,12 +809,12 @@ fn start_python_scheduler(host: &Arc<ServiceHost>, settings: &Settings) -> Resul
                     eprintln!("insider-market: freshness update degraded: {error:?}");
                 }
                 if let Err(error) = cycle_host.run_registered_python_cycle() {
-                    eprintln!("insider-python: decision cycle degraded: {error:?}");
+                    eprintln!("insider-decision: metric/strategy cycle degraded: {error:?}");
                 }
                 std::thread::sleep(Duration::from_millis(interval_ms));
             }
         })
-        .map_err(|error| format!("start Python decision cycle: {error}"))?;
+        .map_err(|error| format!("start metric/strategy decision cycle: {error}"))?;
     Ok(())
 }
 
@@ -795,6 +961,34 @@ fn validate_llm_metadata(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates operator-facing control preferences before any workers start.
+/// These values are presentation/coordination policy; credentials remain
+/// environment or secret-manager inputs and are never accepted from CFG.
+fn validate_operator_preferences(settings: &Settings) -> Result<(), String> {
+    let check = |key: &str, allowed: &[&str]| -> Result<(), String> {
+        if let Some(value) = settings.get(key) {
+            match value {
+                Value::String(text)
+                    if text.len() <= 64 && allowed.iter().any(|candidate| candidate == text) => {}
+                _ => return Err(format!("{key} must be one of {}", allowed.join(", "))),
+            }
+        }
+        Ok(())
+    };
+    check("autonomy.mode", &["MANUAL", "HYBRID", "AUTONOMOUS"])?;
+    check(
+        "terminal.theme",
+        &["AMBER", "BLUE", "GREEN", "GRAY", "MONO"],
+    )?;
+    check("news.sort", &["RELEVANCE", "RECENCY", "SOURCE"])?;
+    if let Some(value) = settings.get("llm.system_prompt")
+        && !matches!(value, Value::String(text) if !text.trim().is_empty() && text.len() <= 16_384)
+    {
+        return Err("llm.system_prompt must be a non-empty string under 16 KiB".into());
+    }
+    Ok(())
+}
+
 fn start_alert_webhook_loop(host: &Arc<ServiceHost>, settings: &Settings) -> Result<(), String> {
     let Some(webhook_url) = configured_alert_webhook_url(settings)? else {
         return Ok(());
@@ -857,16 +1051,49 @@ fn start_alert_webhook_loop(host: &Arc<ServiceHost>, settings: &Settings) -> Res
 /// continues with broker/other-provider data.
 #[allow(clippy::too_many_lines)]
 fn configure_yahoo_history(host: &Arc<ServiceHost>, args: &[String], settings: &Settings) {
-    let Some(instrument_value) = optional_value(args, "--instrument") else {
-        return;
-    };
-    let Some(symbol) = optional_value(args, "--symbol") else {
-        return;
-    };
-    let Ok(instrument_value) = instrument_value.parse::<u128>() else {
-        return;
-    };
-    let Ok(instrument_id) = InstrumentId::new(instrument_value) else {
+    // The desktop manager is CFG-first and normally has no legacy
+    // `--instrument/--symbol/--price` fixture arguments. Select the first
+    // validated Yahoo mapping so the default Trading workspace receives
+    // historical candles as well as quotes.
+    let configured = optional_value(args, "--instrument")
+        .zip(optional_value(args, "--symbol"))
+        .and_then(|(instrument, symbol)| {
+            instrument
+                .parse::<u128>()
+                .ok()
+                .and_then(|value| InstrumentId::new(value).ok())
+                .map(|instrument| (instrument, symbol))
+        })
+        .or_else(|| {
+            configured_optional_string(settings, "market.yahoo_symbols", "IT_YAHOO_SYMBOLS")
+                .ok()
+                .flatten()
+                .and_then(|symbols| {
+                    symbols
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|entry| !entry.is_empty())
+                        .find_map(|entry| {
+                            let (symbol, instrument) = entry.split_once('=')?;
+                            let symbol = symbol.trim().to_ascii_uppercase();
+                            if symbol.is_empty()
+                                || symbol.len() > 16
+                                || !symbol.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || b".-".contains(&byte)
+                                })
+                            {
+                                return None;
+                            }
+                            instrument
+                                .trim()
+                                .parse::<u128>()
+                                .ok()
+                                .and_then(|value| InstrumentId::new(value).ok())
+                                .map(|instrument| (instrument, symbol))
+                        })
+                })
+        });
+    let Some((instrument_id, symbol)) = configured else {
         return;
     };
     let transport_timeout_ms = match configured_u64(
@@ -1284,7 +1511,141 @@ fn configure_yahoo_quotes(host: &Arc<ServiceHost>, args: &[String], settings: &S
     }
 }
 
-fn grant_desktop_capabilities() -> Result<CapabilityPolicy, String> {
+/// Starts credential-free Binance spot quote and candle workers. This is a
+/// production-shaped public-data path for paper testing when an equity vendor
+/// is unreachable; it never substitutes crypto prices for an equity symbol.
+#[allow(clippy::too_many_lines)]
+fn configure_binance_market(host: &Arc<ServiceHost>, settings: &Settings) {
+    let Some(raw_symbols) =
+        configured_optional_string(settings, "market.binance_symbols", "IT_BINANCE_SYMBOLS")
+            .ok()
+            .flatten()
+    else {
+        return;
+    };
+    let base_url = configured_string(
+        settings,
+        "market.binance_base_url",
+        "IT_BINANCE_BASE_URL",
+        "https://api.binance.com",
+    )
+    .unwrap_or_else(|_| "https://api.binance.com".into());
+    let poll_ms = configured_u64(
+        settings,
+        "market.binance_poll_ms",
+        "IT_BINANCE_POLL_MS",
+        5_000,
+        1_000,
+        300_000,
+    )
+    .unwrap_or(5_000);
+    let price_scale = configured_u64(
+        settings,
+        "market.binance_price_scale",
+        "IT_BINANCE_PRICE_SCALE",
+        100,
+        1,
+        1_000_000_000,
+    )
+    .ok()
+    .and_then(|value| i64::try_from(value).ok())
+    .unwrap_or(100);
+    for entry in raw_symbols
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .take(128)
+    {
+        let Some((symbol, instrument)) = entry.split_once('=') else {
+            continue;
+        };
+        let symbol = symbol.trim().to_ascii_uppercase();
+        let Some(instrument_id) = instrument
+            .trim()
+            .parse::<u128>()
+            .ok()
+            .and_then(|value| InstrumentId::new(value).ok())
+        else {
+            continue;
+        };
+        if symbol.is_empty()
+            || symbol.len() > 20
+            || !symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let quote_transport = match MarketReqwestTransport::new(30_000) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("insider-market: Binance transport unavailable: {error}");
+                continue;
+            }
+        };
+        let chart_transport = match MarketReqwestTransport::new(30_000) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("insider-market: Binance transport unavailable: {error}");
+                continue;
+            }
+        };
+        let quote = match BinanceQuoteProvider::new(
+            quote_transport,
+            BinanceQuoteConfig {
+                base_url: base_url.clone(),
+                symbol: symbol.clone(),
+                instrument_id,
+                price_scale,
+            },
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("insider-market: Binance quote configuration rejected: {error}");
+                continue;
+            }
+        };
+        let chart = match BinanceChartProvider::new(
+            chart_transport,
+            BinanceChartConfig {
+                base_url: base_url.clone(),
+                symbol: symbol.clone(),
+                instrument_id,
+                interval: "1m".into(),
+                interval_ns: 60_000_000_000,
+                price_scale,
+                limit: 500,
+            },
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("insider-market: Binance chart configuration rejected: {error}");
+                continue;
+            }
+        };
+        let quote_host = Arc::clone(host);
+        let quote_symbol = symbol.clone();
+        let _ = std::thread::Builder::new().name(format!("binance-quotes-{symbol}")).spawn(move || loop {
+            let wall = SystemTime::now().duration_since(UNIX_EPOCH).ok().and_then(|duration| i64::try_from(duration.as_nanos()).ok()).map_or_else(|| WallTime::from_unix_nanos(0), WallTime::from_unix_nanos);
+            match quote.fetch(quote_host.monotonic_now(), wall) {
+                Ok(event) => if let Err(error) = quote_host.ingest_market_event(MarketEvent::Quote(event), wall) { eprintln!("insider-market: Binance quote rejected for {quote_symbol}: {error:?}"); },
+                Err(error) => eprintln!("insider-market: Binance quote unavailable for {quote_symbol}: {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(poll_ms));
+        });
+        let chart_host = Arc::clone(host);
+        let chart_symbol = symbol.clone();
+        let _ = std::thread::Builder::new().name(format!("binance-chart-{symbol}")).spawn(move || loop {
+            match chart.fetch() {
+                Ok(bars) => for bar in bars { if let Err(error) = chart_host.ingest_market_bar(bar.bar, bar.sequence) { eprintln!("insider-market: Binance bar rejected for {chart_symbol}: {error:?}"); } },
+                Err(error) => eprintln!("insider-market: Binance chart unavailable for {chart_symbol}: {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(poll_ms.max(5_000)));
+        });
+    }
+}
+
+fn grant_client_capabilities() -> Result<CapabilityPolicy, String> {
     let mut policy = CapabilityPolicy::new();
     for capability in [
         "runtime.read",
@@ -1304,11 +1665,16 @@ fn grant_desktop_capabilities() -> Result<CapabilityPolicy, String> {
         "read_model.backup.write",
         "journal.backup.write",
         "risk.state.write",
+        "config.write",
+        "strategy.lifecycle.write",
+        "metric.lifecycle.write",
         "research.backtest",
     ] {
-        policy
-            .grant("desktop", capability)
-            .map_err(|error| format!("grant {capability}: {error:?}"))?;
+        for actor in ["desktop", "terminal"] {
+            policy
+                .grant(actor, capability)
+                .map_err(|error| format!("grant {capability} to {actor}: {error:?}"))?;
+        }
     }
     Ok(policy)
 }
@@ -1325,6 +1691,8 @@ fn configure_demo(
     let broker_is_ibkr = broker_mode == "ibkr";
     let yahoo_symbols =
         configured_optional_string(settings, "market.yahoo_symbols", "IT_YAHOO_SYMBOLS")?;
+    let binance_symbols =
+        configured_optional_string(settings, "market.binance_symbols", "IT_BINANCE_SYMBOLS")?;
 
     let instrument_config = [
         optional_value(args, "--instrument"),
@@ -1449,6 +1817,58 @@ fn configure_demo(
                 continue;
             };
             let _ = catalog.insert(definition, "yahoo".into());
+        }
+    }
+    if let Some(raw_symbols) = binance_symbols.as_deref() {
+        for entry in raw_symbols
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .take(128)
+        {
+            let Some((symbol, instrument)) = entry.split_once('=') else {
+                continue;
+            };
+            let symbol = symbol.trim().to_ascii_uppercase();
+            let Some(instrument_id) = instrument
+                .trim()
+                .parse::<u128>()
+                .ok()
+                .and_then(|value| InstrumentId::new(value).ok())
+            else {
+                continue;
+            };
+            if symbol.is_empty()
+                || symbol.len() > 20
+                || !symbol
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+                || catalog.get(instrument_id).is_some()
+            {
+                continue;
+            }
+            let base_asset = symbol
+                .strip_suffix("USDT")
+                .unwrap_or(symbol.as_str())
+                .to_owned();
+            let definition = Instrument::new(InstrumentSpec {
+                id: instrument_id,
+                symbol: symbol.clone(),
+                asset_class: AssetClass::Crypto,
+                venue: "BINANCE".into(),
+                currency: "USD".into(),
+                price_increment_ticks: 1,
+                quantity_increment_ticks: 1,
+                contract: Contract::Crypto {
+                    base: base_asset,
+                    quote: "USD".into(),
+                },
+                provider_symbol: symbol,
+            })
+            .map_err(|error| format!("Binance instrument definition: {error}"))?;
+            catalog
+                .insert(definition, "binance".into())
+                .map_err(|error| format!("Binance catalog: {error:?}"))?;
         }
     }
     let max_position = configured_positive_i64_setting(
@@ -1967,6 +2387,7 @@ fn configure_broker(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn serve(args: &[String]) -> Result<(), String> {
     let journal = PathBuf::from(value(args, "--journal")?);
     let socket = PathBuf::from(value(args, "--socket")?);
@@ -1979,6 +2400,7 @@ fn serve(args: &[String]) -> Result<(), String> {
     .map_err(|error| format!("account: {error}"))?;
     let settings = configured_risk_settings(args)?;
     validate_llm_metadata(&settings)?;
+    validate_operator_preferences(&settings)?;
     let startup_settings = settings.clone();
     let broker = Arc::new(PaperBroker::new());
     let (broker_gateway, ibkr_market_poll) = configure_broker(&broker, &settings)?;
@@ -1999,6 +2421,13 @@ fn serve(args: &[String]) -> Result<(), String> {
         )
         .map_err(|error| format!("open engine: {error:?}"))?,
     );
+    // Register every configured canonical instrument with the market hub before
+    // provider workers start. This makes CFG-only Yahoo mappings usable without
+    // requiring a synthetic --price fixture or a separately bootstrapped catalog.
+    for instrument in catalog.instruments() {
+        host.register_market_instrument(instrument.id)
+            .map_err(|error| format!("register configured market instrument: {error:?}"))?;
+    }
     configure_context_embeddings(&host, &startup_settings)?;
     let summary = host
         .reconcile_trigger(ReconcileTrigger::Startup)
@@ -2011,7 +2440,15 @@ fn serve(args: &[String]) -> Result<(), String> {
     configure_llm_provider(&host, &startup_settings)?;
     configure_news_polling(&host, args, &startup_settings)?;
     configure_yahoo_news_polling(&host, args, &startup_settings)?;
-    configure_python_packages(&host, &startup_settings)?;
+    let python_enabled = configured_bool(
+        &startup_settings,
+        "python.enabled",
+        "IT_PYTHON_ENABLED",
+        false,
+    )?;
+    if python_enabled {
+        configure_python_packages(&host, &startup_settings)?;
+    }
 
     // The paper composition root exposes its configured instrument through the
     // same canonical market hub used by live/replay providers. This initial
@@ -2046,28 +2483,37 @@ fn serve(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    start_python_scheduler(&host, &startup_settings)?;
+    start_decision_scheduler(&host, &startup_settings)?;
     start_execution_scheduler(&host, &startup_settings)?;
     start_reconciliation_loop(&host, &startup_settings)?;
     start_alert_webhook_loop(&host, &startup_settings)?;
 
     configure_yahoo_history(&host, args, &startup_settings);
     configure_yahoo_quotes(&host, args, &startup_settings);
+    configure_binance_market(&host, &startup_settings);
     if let Some(start) = ibkr_market_poll {
         start(Arc::clone(&host));
     }
 
     let catalog = Arc::new(catalog);
     let service = Arc::new(
-        EngineCommandService::new(host, catalog, grant_desktop_capabilities()?, 4_096)
+        EngineCommandService::new(host, catalog, grant_client_capabilities()?, 4_096)
             .ok_or_else(|| "failed to create command service".to_owned())?,
     );
-    let bridge = DesktopBridge::bind(socket, service, 16 * 1024 * 1024)
-        .map_err(|error| format!("bind desktop bridge: {error:?}"))?;
+    let bridge = ControlPlaneBridge::bind(socket, service, 16 * 1024 * 1024)
+        .map_err(|error| format!("bind control plane: {error:?}"))?;
     loop {
-        bridge
-            .serve_next()
-            .map_err(|error| format!("desktop bridge: {error:?}"))?;
+        if let Err(error) = bridge.serve_next() {
+            // A malformed, unauthorized, or stale individual terminal command
+            // must fail that request without terminating the authoritative
+            // runtime. Listener/bind failures remain fatal.
+            let diagnostic = format!("{error:?}");
+            if diagnostic.contains("Handler(") {
+                eprintln!("insider-runtime: rejected request: {diagnostic}");
+                continue;
+            }
+            return Err(format!("control plane: {diagnostic}"));
+        }
     }
 }
 
@@ -2083,7 +2529,7 @@ fn run(args: &[String]) -> Result<(), String> {
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if let Err(error) = run(&args) {
-        eprintln!("insider-desktop-bridge: {error}");
+        eprintln!("insider-runtime: {error}");
         std::process::exit(2);
     }
 }
@@ -2094,10 +2540,27 @@ mod tests {
         configured_alert_webhook_url, configured_bool, configured_cfg_settings,
         configured_env_string, configured_env_u64, configured_f64, configured_news_retry_policy,
         configured_optional_string, configured_paper_quote, configured_positive_i64_setting,
-        configured_positive_i128_setting, configured_string, configured_u64, valid_ibkr_account_id,
-        validate_llm_base_url, validate_llm_metadata,
+        configured_positive_i128_setting, configured_string, configured_u64,
+        grant_client_capabilities, valid_ibkr_account_id, validate_llm_base_url,
+        validate_llm_metadata, validate_operator_preferences,
     };
     use insider_cfg_core::{Settings, Value};
+
+    #[test]
+    fn terminal_advertised_mutations_have_explicit_capabilities() {
+        let Ok(policy) = grant_client_capabilities() else {
+            return;
+        };
+        for actor in ["terminal", "desktop"] {
+            for capability in [
+                "config.write",
+                "strategy.lifecycle.write",
+                "metric.lifecycle.write",
+            ] {
+                assert!(policy.authorize(actor, capability).is_ok());
+            }
+        }
+    }
 
     #[test]
     fn paper_quote_arguments_are_complete_bounded_and_positive() {
@@ -2702,5 +3165,21 @@ mod tests {
         assert!(validate_llm_metadata(&empty).is_err());
         let wrong = Settings::from([("llm.model".to_owned(), Value::Integer(1))]);
         assert!(validate_llm_metadata(&wrong).is_err());
+    }
+
+    #[test]
+    fn operator_preferences_are_bounded_and_enum_validated() {
+        let valid = Settings::from([
+            ("autonomy.mode".to_owned(), Value::String("HYBRID".into())),
+            ("terminal.theme".to_owned(), Value::String("BLUE".into())),
+            ("news.sort".to_owned(), Value::String("RECENCY".into())),
+            (
+                "llm.system_prompt".to_owned(),
+                Value::String("Explain risk.".into()),
+            ),
+        ]);
+        assert!(validate_operator_preferences(&valid).is_ok());
+        let invalid = Settings::from([("news.sort".to_owned(), Value::String("PRICE".into()))]);
+        assert!(validate_operator_preferences(&invalid).is_err());
     }
 }

@@ -99,6 +99,13 @@ impl ReqwestHttpTransport {
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(timeout)
             .timeout(timeout)
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 InsiderTrader/0.1")
+            .http1_only()
+            // Some Arch environments advertise an unreachable IPv6 route while
+            // IPv4 is available. Pinning the socket to wildcard IPv4 keeps the
+            // provider deterministic instead of surfacing a generic transport
+            // failure before Yahoo can be reached.
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -221,6 +228,254 @@ pub struct YahooQuoteConfig {
     pub price_scale: i64,
 }
 
+/// Binance public REST quote adapter configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BinanceQuoteConfig {
+    /// HTTPS endpoint root, normally `https://api.binance.com`.
+    pub base_url: String,
+    /// Spot symbol such as `BTCUSDT`.
+    pub symbol: String,
+    /// Canonical instrument identity.
+    pub instrument_id: InstrumentId,
+    /// Decimal price multiplier used to create integer ticks.
+    pub price_scale: i64,
+}
+
+/// Binance public REST candle adapter configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BinanceChartConfig {
+    /// HTTPS endpoint root.
+    pub base_url: String,
+    /// Spot symbol such as `BTCUSDT`.
+    pub symbol: String,
+    /// Canonical instrument identity.
+    pub instrument_id: InstrumentId,
+    /// Binance interval token such as `1m`.
+    pub interval: String,
+    /// Canonical bar width.
+    pub interval_ns: u64,
+    /// Decimal price multiplier used to create integer ticks.
+    pub price_scale: i64,
+    /// Maximum candles requested, bounded to 1..=1,000.
+    pub limit: usize,
+}
+
+/// Binance public best-bid/ask provider.
+pub struct BinanceQuoteProvider<T> {
+    transport: T,
+    config: BinanceQuoteConfig,
+    next_sequence: Mutex<u64>,
+}
+
+/// Binance public OHLCV provider.
+pub struct BinanceChartProvider<T> {
+    transport: T,
+    config: BinanceChartConfig,
+    next_sequence: Mutex<u64>,
+    last_open_time_ms: Mutex<Option<i64>>,
+}
+
+fn valid_binance_symbol(symbol: &str) -> bool {
+    !symbol.is_empty()
+        && symbol.len() <= 20
+        && symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+impl<T: HttpTransport> BinanceQuoteProvider<T> {
+    /// Creates a bounded public Binance quote adapter.
+    ///
+    /// # Errors
+    /// Returns an error when endpoint, symbol, or tick scale is invalid.
+    pub fn new(transport: T, mut config: BinanceQuoteConfig) -> Result<Self, String> {
+        let base_url = config.base_url.trim_end_matches('/').to_owned();
+        base_url.clone_into(&mut config.base_url);
+        config.symbol = config.symbol.trim().to_ascii_uppercase();
+        if !valid_https_base_url(&config.base_url)
+            || !valid_binance_symbol(&config.symbol)
+            || config.price_scale <= 0
+        {
+            return Err("invalid Binance quote configuration".into());
+        }
+        Ok(Self {
+            transport,
+            config,
+            next_sequence: Mutex::new(0),
+        })
+    }
+
+    /// Fetches the public best bid and ask without credentials.
+    ///
+    /// # Errors
+    /// Returns a bounded transport, HTTP, schema, or price diagnostic.
+    pub fn fetch(
+        &self,
+        received_mono: MonoTime,
+        fallback_exchange_time: WallTime,
+    ) -> Result<Quote, String> {
+        let response = self.transport.send(HttpRequest {
+            method: "GET".into(),
+            url: format!(
+                "{}/api/v3/ticker/bookTicker?symbol={}",
+                self.config.base_url,
+                encode_component(&self.config.symbol)
+            ),
+            headers: BTreeMap::from([("accept".into(), "application/json".into())]),
+        })?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!("Binance quote HTTP status {}", response.status));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.body).map_err(|_| "invalid Binance quote JSON")?;
+        let bid = string_price(value.get("bidPrice"), self.config.price_scale)
+            .ok_or("Binance bid price missing")?;
+        let ask = string_price(value.get("askPrice"), self.config.price_scale)
+            .ok_or("Binance ask price missing")?;
+        if bid <= 0 || ask <= 0 || bid > ask {
+            return Err("Binance quote spread is invalid".into());
+        }
+        let mut sequence = self
+            .next_sequence
+            .lock()
+            .map_err(|_| "Binance quote sequence state poisoned")?;
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or("Binance quote sequence overflow")?;
+        Ok(Quote {
+            instrument_id: self.config.instrument_id,
+            sequence: *sequence,
+            exchange_time: fallback_exchange_time,
+            received_mono,
+            bid_ticks: bid,
+            ask_ticks: ask,
+            bid_quantity_ticks: 1,
+            ask_quantity_ticks: 1,
+        })
+    }
+}
+
+impl<T: HttpTransport> BinanceChartProvider<T> {
+    /// Creates a bounded public Binance candle adapter.
+    ///
+    /// # Errors
+    /// Returns an error when configuration is invalid.
+    pub fn new(transport: T, mut config: BinanceChartConfig) -> Result<Self, String> {
+        let base_url = config.base_url.trim_end_matches('/').to_owned();
+        base_url.clone_into(&mut config.base_url);
+        config.symbol = config.symbol.trim().to_ascii_uppercase();
+        let interval = config.interval.trim().to_owned();
+        interval.clone_into(&mut config.interval);
+        if !valid_https_base_url(&config.base_url)
+            || !valid_binance_symbol(&config.symbol)
+            || config.interval.is_empty()
+            || config.interval.len() > 8
+            || config.interval_ns == 0
+            || config.price_scale <= 0
+            || !(1..=1_000).contains(&config.limit)
+        {
+            return Err("invalid Binance chart configuration".into());
+        }
+        Ok(Self {
+            transport,
+            config,
+            next_sequence: Mutex::new(0),
+            last_open_time_ms: Mutex::new(None),
+        })
+    }
+
+    /// Fetches a bounded public kline window.
+    ///
+    /// # Errors
+    /// Returns a bounded transport, HTTP, schema, timestamp, or OHLCV diagnostic.
+    pub fn fetch(&self) -> Result<Vec<YahooBar>, String> {
+        let response = self.transport.send(HttpRequest {
+            method: "GET".into(),
+            url: format!(
+                "{}/api/v3/klines?symbol={}&interval={}&limit={}",
+                self.config.base_url,
+                encode_component(&self.config.symbol),
+                encode_component(&self.config.interval),
+                self.config.limit
+            ),
+            headers: BTreeMap::from([("accept".into(), "application/json".into())]),
+        })?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!("Binance chart HTTP status {}", response.status));
+        }
+        let rows: serde_json::Value =
+            serde_json::from_slice(&response.body).map_err(|_| "invalid Binance chart JSON")?;
+        let rows = rows.as_array().ok_or("Binance chart rows missing")?;
+        let mut bars = Vec::with_capacity(rows.len());
+        let mut previous_time = None;
+        let last_seen = *self
+            .last_open_time_ms
+            .lock()
+            .map_err(|_| "Binance chart timestamp state poisoned")?;
+        for row in rows {
+            let values = row.as_array().ok_or("Binance kline row invalid")?;
+            if values.len() < 6 {
+                return Err("Binance kline row truncated".into());
+            }
+            let time_ms = values[0]
+                .as_i64()
+                .ok_or("Binance kline timestamp invalid")?;
+            if time_ms <= 0 || previous_time.is_some_and(|previous| time_ms <= previous) {
+                return Err("Binance kline timestamps are not increasing".into());
+            }
+            previous_time = Some(time_ms);
+            if last_seen.is_some_and(|last| time_ms < last) {
+                continue;
+            }
+            let open = string_price(values.get(1), self.config.price_scale)
+                .ok_or("Binance open invalid")?;
+            let high = string_price(values.get(2), self.config.price_scale)
+                .ok_or("Binance high invalid")?;
+            let low = string_price(values.get(3), self.config.price_scale)
+                .ok_or("Binance low invalid")?;
+            let close = string_price(values.get(4), self.config.price_scale)
+                .ok_or("Binance close invalid")?;
+            let volume = string_price(values.get(5), 1).unwrap_or(1).max(1);
+            if high < low || open < low || open > high || close < low || close > high {
+                return Err("Binance candle violates OHLC invariants".into());
+            }
+            let start_ns = time_ms
+                .checked_mul(1_000_000)
+                .ok_or("Binance timestamp overflow")?;
+            bars.push(YahooBar {
+                bar: Bar {
+                    instrument_id: self.config.instrument_id,
+                    start_time: WallTime::from_unix_nanos(start_ns),
+                    interval_ns: self.config.interval_ns,
+                    open_ticks: open,
+                    high_ticks: high,
+                    low_ticks: low,
+                    close_ticks: close,
+                    volume_ticks: volume,
+                },
+                sequence: 0,
+            });
+        }
+        let mut next = self
+            .next_sequence
+            .lock()
+            .map_err(|_| "Binance chart sequence state poisoned")?;
+        for bar in &mut bars {
+            *next = next
+                .checked_add(1)
+                .ok_or("Binance chart sequence overflow")?;
+            bar.sequence = *next;
+        }
+        if let Some(latest) = previous_time {
+            *self
+                .last_open_time_ms
+                .lock()
+                .map_err(|_| "Binance chart timestamp state poisoned")? = Some(latest);
+        }
+        Ok(bars)
+    }
+}
+
 impl<T: HttpTransport> YahooChartProvider<T> {
     /// Creates a chart adapter. Prices are converted to integer ticks using
     /// `price_scale`; no floating-point value crosses the provider boundary.
@@ -279,11 +534,14 @@ impl<T: HttpTransport> YahooChartProvider<T> {
         );
         let mut headers = BTreeMap::new();
         headers.insert("accept".into(), "application/json".into());
-        let response = self.transport.send(HttpRequest {
+        let response = match self.transport.send(HttpRequest {
             method: "GET".into(),
             url,
             headers,
-        })?;
+        }) {
+            Ok(response) => response,
+            Err(error) => return Err(format!("Yahoo chart transport: {error}")),
+        };
         if !(200..300).contains(&response.status) {
             return Err(format!("Yahoo chart HTTP status {}", response.status));
         }
@@ -349,13 +607,32 @@ impl<T: HttpTransport> YahooQuoteProvider<T> {
         );
         let mut headers = BTreeMap::new();
         headers.insert("accept".into(), "application/json".into());
-        let response = self.transport.send(HttpRequest {
+        let response = match self.transport.send(HttpRequest {
             method: "GET".into(),
             url,
             headers,
-        })?;
+        }) {
+            Ok(response) => response,
+            Err(error) => {
+                return self.fetch_chart_quote(
+                    None,
+                    received_mono,
+                    fallback_exchange_time,
+                    Some(error),
+                );
+            }
+        };
         if !(200..300).contains(&response.status) {
-            return Err(format!("Yahoo quote HTTP status {}", response.status));
+            // Yahoo's `/v7/finance/quote` endpoint is frequently rate-limited
+            // for unauthenticated clients even when the chart endpoint works.
+            // Use the same provider's chart response for a last-trade quote;
+            // bid/ask are explicitly equal to that last trade (not invented).
+            return self.fetch_chart_quote(
+                Some(response.status),
+                received_mono,
+                fallback_exchange_time,
+                None,
+            );
         }
         if response.body.len() > MAX_RESPONSE_BYTES {
             return Err("Yahoo quote response exceeds bound".into());
@@ -413,6 +690,121 @@ impl<T: HttpTransport> YahooQuoteProvider<T> {
             ask_quantity_ticks: 1,
         })
     }
+
+    fn fetch_chart_quote(
+        &self,
+        quote_status: Option<u16>,
+        received_mono: MonoTime,
+        fallback_exchange_time: WallTime,
+        primary_error: Option<String>,
+    ) -> Result<Quote, String> {
+        let url = format!(
+            "{}/v8/finance/chart/{}?interval=1m&range=1d",
+            self.base_url,
+            encode_component(&self.symbol)
+        );
+        let mut headers = BTreeMap::new();
+        headers.insert("accept".into(), "application/json".into());
+        headers.insert("user-agent".into(), "Mozilla/5.0".into());
+        let request = HttpRequest {
+            method: "GET".into(),
+            url: url.clone(),
+            headers: headers.clone(),
+        };
+        // Yahoo operates two equivalent query hosts. When an edge node resets
+        // the first connection (common during throttling), retry once against
+        // query2 before declaring the provider unavailable.
+        let response = match self.transport.send(request) {
+            Ok(response) => response,
+            Err(primary) if self.base_url.contains("query1.finance.yahoo.com") => {
+                let alternate_url =
+                    url.replace("query1.finance.yahoo.com", "query2.finance.yahoo.com");
+                self.transport
+                    .send(HttpRequest {
+                        method: "GET".into(),
+                        url: alternate_url,
+                        headers,
+                    })
+                    .map_err(|alternate| {
+                        format!("{primary}; alternate Yahoo host failed: {alternate}")
+                    })?
+            }
+            Err(error) => return Err(error),
+        };
+        if !(200..300).contains(&response.status) {
+            return Err(match (quote_status, primary_error) {
+                (Some(status), _) => format!(
+                    "Yahoo quote HTTP status {status}; chart fallback HTTP status {}",
+                    response.status
+                ),
+                (None, Some(error)) => format!(
+                    "Yahoo quote transport failed ({error}); chart fallback HTTP status {}",
+                    response.status
+                ),
+                (None, None) => format!("Yahoo chart fallback HTTP status {}", response.status),
+            });
+        }
+        let (price, timestamp) = parse_yahoo_chart_last_price(&response.body, self.price_scale)?;
+        let exchange_time = timestamp
+            .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+            .map(WallTime::from_unix_nanos)
+            .filter(|time| *time <= fallback_exchange_time)
+            .unwrap_or(fallback_exchange_time);
+        let mut sequence = self
+            .next_sequence
+            .lock()
+            .map_err(|_| "Yahoo quote sequence state poisoned".to_owned())?;
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| "Yahoo quote sequence overflow".to_owned())?;
+        Ok(Quote {
+            instrument_id: self.instrument_id,
+            sequence: *sequence,
+            exchange_time,
+            received_mono,
+            bid_ticks: price,
+            ask_ticks: price,
+            bid_quantity_ticks: 1,
+            ask_quantity_ticks: 1,
+        })
+    }
+}
+
+fn parse_yahoo_chart_last_price(
+    body: &[u8],
+    price_scale: i64,
+) -> Result<(i64, Option<i64>), String> {
+    let root: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "invalid Yahoo chart JSON")?;
+    let result = root
+        .get("chart")
+        .and_then(|value| value.get("result"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.first())
+        .ok_or("Yahoo chart result missing")?;
+    let timestamps = result
+        .get("timestamp")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Yahoo chart timestamps missing")?;
+    let closes = result
+        .get("indicators")
+        .and_then(|value| value.get("quote"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(|quote| quote.get("close"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Yahoo chart close missing")?;
+    for index in (0..closes.len().min(timestamps.len())).rev() {
+        if let Some(price) = json_price(&closes[index], price_scale) {
+            return Ok((
+                price,
+                timestamps[index]
+                    .as_i64()
+                    .filter(|timestamp| *timestamp > 0),
+            ));
+        }
+    }
+    Err("Yahoo chart fallback returned no quote".into())
 }
 
 fn parse_yahoo_chart(
@@ -492,8 +884,11 @@ fn parse_yahoo_chart(
             continue;
         };
         let volume = volume[index].as_i64().ok_or("Yahoo volume invalid")?;
-        if high < low || open < low || open > high || close < low || close > high || volume <= 0 {
+        if high < low || open < low || open > high || close < low || close > high {
             return Err("Yahoo candle violates OHLCV invariants".into());
+        }
+        if volume <= 0 {
+            continue;
         }
         let start_ns = timestamp
             .checked_mul(1_000_000_000)
@@ -519,6 +914,19 @@ fn parse_yahoo_chart(
 fn json_price(value: &serde_json::Value, scale: i64) -> Option<i64> {
     let price = value.as_f64()?;
     if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let scaled = price * scale as f64;
+    if !scaled.is_finite() || scaled > i64::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i64)
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn string_price(value: Option<&serde_json::Value>, scale: i64) -> Option<i64> {
+    let price = value?.as_str()?.parse::<f64>().ok()?;
+    if !price.is_finite() || price <= 0.0 || scale <= 0 {
         return None;
     }
     let scaled = price * scale as f64;

@@ -2,7 +2,7 @@
 > Status: normative engineering specification.
 > Target: an institutional-grade, deadline-aware trading platform that supports manual, hybrid, and autonomous operation.
 > Design rule: InsiderTrader is not a ChatGPT wrapper. LLMs extend a deterministic trading system; they do not replace metrics, strategies, portfolio logic, risk, execution, replay, or observability.
-> Primary runtime: Rust. Research/ML: Rust + Python. Desktop shell: Tauri 2 + TypeScript frontend.
+> Primary runtime: Rust. Research/ML: Rust + Python. Workstation: native Rust terminal UI.
 ## 0. Mission
 InsiderTrader is a modular systematic-trading workstation and autonomous trading runtime.
 Its architecture has four first-class computational layers: Market State, Metrics, Strategies, and Decision/Execution.
@@ -42,7 +42,7 @@ Market Data + Reference Data + News + Account State
 A metric is not a strategy.
 A strategy is not an order.
 An LLM response is not broker state.
-The UI is not the source of truth.
+The terminal is not the source of truth.
 The journal and reconciled runtime state are authoritative for execution state.
 ## 2. Core definitions
 **Metric**: a bounded computation that emits measurements, forecasts, probabilities, scores, uncertainty, or regime estimates.
@@ -61,8 +61,8 @@ The journal and reconciled runtime state are authoritative for execution state.
 - The LLM layer MUST be provider-agnostic and support OpenAI-style HTTP APIs through configurable base URLs.; The application MUST support both streaming and non-streaming LLM responses.
 - LLM output that can affect trading MUST be schema-validated before it becomes an internal action.; Market data, metrics, strategies, risk, and execution MUST continue to function when the LLM provider is unavailable.
 - News retrieval MUST be a provider layer, not hard-coded to one vendor.; Yahoo Finance SHOULD be supported as a convenient market/news adapter, but provider failure MUST degrade cleanly.
-- The UI MUST support rearrangeable tabs, docked panels, floating groups, and persisted layouts.; Charts MUST support multiple panes, overlays, drawings, metric overlays, strategy annotations, and news markers.
-- Manual traders MUST be able to inspect strategies, metrics, news, account state, and risk without invoking autonomous trading.; Autonomous trading MUST expose its current plan, selected strategies, model/provider, reasons, and pending actions in the UI.
+- The terminal MUST provide mnemonic function navigation, function keys, dense tables, keyboard-only operation, bounded scrolling, automatic refresh, and persisted operator preferences.; Charts MUST provide fast terminal-native price/history views plus metric, strategy, execution, and news annotations where supported. An optional loopback-only browser chart MAY provide a familiar TradingView-style presentation, but MUST remain a bounded projection with no independent trading state or broker connection.
+- Manual traders MUST be able to inspect strategies, metrics, news, account state, and risk without invoking autonomous trading.; Autonomous trading MUST expose its current plan, selected strategies, model/provider, reasons, and pending actions in the terminal.
 - Configuration reload MUST remain atomic.; Historical backtests MUST remain point-in-time correct.
 - Order submission MUST remain idempotent and reconciled.
 - Filesystem package discovery for metrics and strategies MUST be recursive but bounded,
@@ -75,7 +75,7 @@ The journal and reconciled runtime state are authoritative for execution state.
   parsing; oversized manifests MUST produce a typed discovery error.
 - Manifest keys MUST be unique within a package; duplicate keys MUST be rejected rather
   than resolved by last-write-wins semantics.
-- The desktop bridge MUST stream `.cfg` files through the same 1 MiB input bound before
+- The runtime and terminal MUST stream `.cfg` files through the same 1 MiB input bound before
   handing text to `cfg-core`; oversized files MUST fail before startup settings load.
 - A canonical instrument MAY have multiple provider identities; inserting an already
   known canonical definition MUST index every provider/venue/symbol tuple so fallback
@@ -119,7 +119,7 @@ The journal and reconciled runtime state are authoritative for execution state.
 - News versioning MUST reject canonical-URL collisions across different article IDs
   without overwriting the existing URL index or orphaning the original item.
 - Canonical news links MUST use HTTPS and contain a non-empty authority; invalid URL
-  forms MUST be rejected before storage or UI navigation.
+  forms MUST be rejected before storage or terminal navigation.
 - News retention MUST enforce a hard 100,000-item maximum regardless of caller-supplied
   capacity; lower capacities remain allowed for constrained deployments and tests.
 ## 4. Repository layout
@@ -189,19 +189,9 @@ insidertrader/
 │   ├── validation/
 │   ├── news/
 │   └── agents/
-├── ui/
-│   ├── src/
-│   │   ├── app/
-│   │   ├── panels/
-│   │   ├── charts/
-│   │   ├── components/
-│   │   ├── commands/
-│   │   ├── stores/
-│   │   ├── layouts/
-│   │   ├── theme/
-│   │   └── workers/
-│   ├── src-tauri/
-│   └── package.json
+├── crates/
+│   ├── terminal/
+│   └── desktop-bridge/  # headless runtime/control-plane package (`insider-runtime`)
 ├── schemas/
 ├── config/
 ├── data/
@@ -374,7 +364,7 @@ The default institutional design SHOULD use virtual strategy books plus a joint 
 Mode changes who initiates the final action; they do not fork the entire architecture.
 ### 9.1 Manual mode
 The system continuously calculates metrics, strategies, risk previews, news relevance, and LLM analysis.
-Strategy proposals appear in the UI with action, confidence, horizon, expected risk, historical statistics, current conditions, and evidence.
+Strategy proposals appear in the terminal with action, confidence, horizon, expected risk, historical statistics, current conditions, and evidence.
 The user may click a proposal to prefill an order/target ticket.
 Nothing is sent until the user confirms.
 ### 9.2 Hybrid mode
@@ -477,7 +467,7 @@ A provider outage MUST not crash charts, metrics, deterministic strategies, or m
 - Every trading-relevant LLM request receives a `TraceId`.; Prompts MUST be versioned.
 - System prompt, tool schema, model, temperature, and input context hashes MUST be journaled for reproducibility where practical.; Trading-relevant output MUST be schema-validated.
 - The engine MUST distinguish transport failure, provider failure, refusal, malformed output, timeout, and semantic-validation failure.; LLM output MUST have a TTL.
-- The UI MUST show when displayed analysis is stale.; Remote LLM latency MUST never block the scheduler hot path.
+- The terminal MUST show when displayed analysis is stale.; Remote LLM latency MUST never block the scheduler hot path.
 - News summaries SHOULD be cached by article/content hash.; Repeated equivalent requests SHOULD reuse cached analysis when freshness permits.
 - Token budgets MUST be explicit by task class.
 Suggested task classes:
@@ -511,7 +501,7 @@ keys (`news.newsapi_country`, `news.newsapi_category`, `news.newsapi_sources`) w
 present, with environment variables used only as fallback when the corresponding key
 is absent. Wrong CFG types and oversized values MUST fail before provider startup.
 Search parameters SHOULD expose query, source/domain filters, time range, language, sort mode, and pagination.
-The adapter MUST paginate in the background so the UI can implement infinite scrolling.
+The adapter MUST paginate in the background so the terminal can implement bounded scrolling.
 API keys are secret references, not literals in CFG.
 ### 14.3 Yahoo Finance integration
 Implement Yahoo Finance behind a replaceable provider module.
@@ -519,7 +509,7 @@ Useful current endpoints commonly used by community clients include:
 - `/v8/finance/chart/{symbol}` for OHLCV/chart history.; `/v1/finance/search?q={query}&quotesCount=N&newsCount=N` for search plus news results.
 - `/v7/finance/quote` for multi-symbol quote data where available.; `/v10/finance/quoteSummary/{symbol}` for richer summary data where available.
 Because these endpoints are not a stability contract for InsiderTrader, the adapter MUST isolate cookie/crumb logic, throttling behavior, schema changes, and provider-specific failures.
-Yahoo Finance is useful for research, UI fallback, and convenient context; the rest of InsiderTrader MUST not depend structurally on it.
+Yahoo Finance is useful for research, terminal fallback, and convenient context; the rest of InsiderTrader MUST not depend structurally on it.
 ### 14.4 News item schema
 ```rust
 struct NewsItem {
@@ -542,7 +532,7 @@ struct NewsItem {
 - canonical URL match; content hash match
 - normalized title similarity; same-event semantic clustering
 - publisher syndication detection
-Do not flood the UI with twenty copies of the same wire story.
+Do not flood the terminal with twenty copies of the same wire story.
 ## 15. News intelligence and relevance
 Every chart should have two news views: `Relevant` and `All`.
 `Relevant` answers what matters most to the active chart and current timeframe.
@@ -572,7 +562,7 @@ When a chart changes symbol or timeframe:
 5. score relevance for the chart timeframe
 6. render top items immediately
 7. asynchronously attach LLM summaries and implications
-### 15.3 News UI behavior
+### 15.3 News terminal behavior
 - scrolling feed with virtualization; Relevant / All / Watchlist / Portfolio tabs
 - time filters; source filters
 - event-type filters; LLM summary toggle
@@ -613,144 +603,63 @@ Embeddings SHOULD be generated for headlines, summaries, event descriptions, str
 Store embedding model/version with every vector.
 A provider change requires either versioned mixed-index handling or re-embedding.
 Retrieval should combine lexical search, graph traversal, metadata filters, and vector similarity.
-## 18. Desktop UI architecture
-The desktop client should feel like a premium professional trading workstation, not an admin dashboard.
-Recommended shell: Tauri 2, with Rust commands/events bridging the desktop UI to local InsiderTrader services.
-Recommended frontend: TypeScript + React or SolidJS; choose one and standardize.
-Recommended layout manager: Dockview or equivalent IDE-style docking system.
-Recommended primary financial chart renderer: TradingView Lightweight Charts, extended with custom primitives/plugins where required.
-### 18.1 Why this split
-- Rust remains responsible for system state, IPC, providers, trading, and performance-critical computation.; The frontend receives typed snapshots and event deltas.
-- Web UI technologies provide better docking, animation, typography, blur, and theming ergonomics than a bespoke low-level GUI for this workstation class.; Tauri permits multiple native windows while keeping application logic in Rust.
-### 18.2 UI process boundaries
-The UI MUST NOT own broker credentials.
-Closing or crashing the UI MUST NOT stop an autonomous execution node unless explicitly configured as a single-user desktop-only deployment.
-The UI subscribes to runtime state through a typed local bridge.
-High-frequency chart data SHOULD use binary batches or shared buffers rather than JSON-per-tick messages.
-## 19. Docking workspace
-Every major view is a panel.
-Panels may be:
-- docked; tabbed
-- split horizontally; split vertically
-- resized; floated inside the workspace
-- popped out into native windows; maximized
-- closed and restored
-Layouts MUST serialize to a versioned `WorkspaceLayout`.
-Users can create named workspaces such as `Day Trading`, `Research`, `Portfolio`, `Autonomy`, and `News`.
-Changing symbol in one panel may optionally broadcast through a link group.
-The workstation MUST also support a bounded custom-workspace lifecycle: duplicate the
-current validated layout from one of the approved templates, rename it, reorder tabs,
-and delete it. Custom names MUST be validated against a documented allowlist and MUST
-not collide with built-in presets. Custom metadata, layout, and symbol/timeframe context
-are presentation-only and MUST be persisted independently of journal, portfolio,
-position, order, broker, or autonomy state. Rename/delete MUST remove obsolete persisted
-keys so reusing a name cannot resurrect stale panels or chart context. Deleting the
-active custom workspace MUST return to the built-in Trading workspace.
-### 19.1 Link groups
-Panels can share a color-coded link ID.
-Linked panels synchronize selected properties:
-- symbol; timeframe
-- crosshair timestamp; watchlist selection
-- strategy selection
-A chart may be linked to its News, Order Ticket, Metrics, and Strategy Inspector panels.
-## 20. Visual design system
-The default style is dark, glass-like, compact, and information-dense.
-Glass is visual hierarchy, not an excuse for low contrast.
-### 20.1 Design tokens
-```css
-:root {
-  --surface-0: rgba(10, 12, 16, 0.82);
-  --surface-1: rgba(18, 22, 30, 0.72);
-  --surface-2: rgba(30, 36, 48, 0.60);
-  --glass-blur: 18px;
-  --glass-saturate: 135%;
-  --border-soft: rgba(255, 255, 255, 0.08);
-  --text-primary: rgba(255, 255, 255, 0.95);
-  --text-secondary: rgba(255, 255, 255, 0.62);
-  --radius-panel: 12px;
-  --radius-control: 8px;
-}
-```
-### 20.2 Rendering requirements
-- blur only on composited surfaces where GPU cost is acceptable; avoid blur behind rapidly updating chart canvases
-- use subtle 1px borders to separate glass panels; use restrained shadows
-- use tabular numerals for prices and PnL; use color in addition to icons/text, never color alone, for state
-- animations must be short and cancelable; streaming updates should not cause layout shifts
-## 21. Required UI panels
-- **Chart** — candlesticks, line/area, volume, overlays, drawings, strategy and news markers.; **Watchlist** — sortable instruments, price, change, volume, strategy status, alerts.
-- **Order Ticket** — manual order/target entry with live preview.; **Positions** — current positions, cost basis, PnL, exposure, strategy attribution.
-- **Portfolio** — gross/net, sector/factor views, equity curve, allocations.; **Strategy Browser** — all installed strategies and current status.
-- **Strategy Inspector** — proposal stream, risk, expected horizon, metrics used, performance.; **Strategy Comparison** — compare multiple strategies side by side.
-- **Metrics** — live metric values, z-scores, confidence, latency, health.; **Metric Inspector** — definition, inputs, history, diagnostics.
-- **Relevant News** — highest-ranked news for linked chart.; **All News** — complete scrollable feed.
-- **News Detail** — article metadata, linked entities, LLM summary, event cluster.; **AI Analyst** — conversational analysis of selected chart/news/strategy context.
-- **Autonomy Console** — current autonomous plan, model, actions, timers, strategy selection.; **Risk** — limits, utilization, stress, drawdown, concentration.
-- **Depth / Order Book** — L2 depth where available.; **Time & Sales** — streaming prints.
-- **Screener** — filter market by metrics and strategy state.; **Heatmap** — sector/index/watchlist heatmaps.
-- **Correlation** — instrument/strategy correlation matrix.; **Alerts** — price, metric, strategy, news, risk, and system alerts.
-- **Backtest** — run/history/results comparison.; **Experiment Registry** — research runs and artifacts.
-- **Model Registry** — active models and challengers.; **TCA** — slippage, arrival price, fills, execution quality.
-- **Broker Status** — sessions, reconnect state, rate limits, balances.; **System Health** — latency, queues, worker restarts, clocks, journal.
-- **Logs/Trace** — reconstruct a decision by TraceId.
-## 22. Chart system
-Charts are the visual center of manual InsiderTrader.
-The chart renderer MUST support candles, bars, line, area, volume, multiple panes, synchronized crosshair, custom primitives, and overlays.
-### 22.1 Chart panes
-- price pane; volume pane
-- indicator/metric panes; strategy score pane
-- volatility pane; order-flow pane
-- custom user panes
-### 22.2 Chart overlays
-- moving averages; VWAP
-- bands; support/resistance
-- metric signals; strategy entries/exits
-- open position and average price; working orders
-- fills; news/event markers
-- LLM-noted event regions
-### 22.3 News markers
-News markers are generated from NewsItem/NewsCluster timestamps, not from the LLM text.
-Hover shows title/source/time/relevance.
-Click opens the linked News Detail panel.
-Clustered markers collapse when zoomed out.
-## 23. Strategy UI
-Strategies need a dedicated first-class experience.
-### 23.1 Strategy Browser columns
-- name; version
-- state; mode: manual/hybrid/auto
-- universe; horizon
-- current proposal count; confidence
-- risk budget used; live PnL
-- 30d PnL; drawdown
-- Sharpe/selected risk-adjusted metric; turnover
-- last action; health
-### 23.2 Strategy Inspector sections
-- human-readable description; input dependency graph
-- live proposals; metrics used
-- news/context inputs; current market regime
-- historical equity curve; drawdowns
-- PnL attribution; risk exposure
-- TCA; latency
-- backtest references; model versions
-- configuration snapshot
-### 23.3 Manual proposal card
-A proposal card should show:
-- strategy; BUY/SELL/REDUCE/CLOSE/NO ACTION
-- suggested target; confidence
-- expected horizon; expected volatility/risk
-- estimated cost/slippage; key metrics
-- top news evidence; current position impact
-- historical similar-condition behavior
-## 24. AI Analyst UI
-The AI Analyst is contextual rather than a generic blank chatbot.
-The panel always knows its linked workspace context but displays exactly what data it is using.
-Context chips may include:
-- `AAPL`; `5m chart`
-- `last 2h`; `3 selected news items`
-- `breakout.v6`; `current position`
-- `metric bundle`
-Users can remove chips to control context.
-Suggested actions can include `Explain move`, `Summarize relevant news`, `Compare strategies`, `Why is risk high?`, `What changed since open?`, and `Analyze this region`.
-The answer SHOULD cite internal evidence cards/objects so the user can jump back to the source panel.
+## 18. Native terminal workstation architecture
+The client MUST feel like a premium professional market terminal: mnemonic-first,
+keyboard-only, information-dense, predictable, and fast under continuous updates.
+The workstation is a Rust binary using a terminal renderer and the authenticated
+Unix command transport. It MUST NOT embed a browser, WebView, Node runtime, or a
+second copy of trading state. It MAY launch the operator's system browser for a
+loopback-only chart projection that uses no remote UI assets.
+### 18.1 Process boundaries
+- The headless runtime owns providers, trading, journal, reconciliation, and credentials.
+- The terminal owns bounded presentation state, current function, selection, scroll, and command input only.
+- Closing or crashing the terminal MUST NOT stop autonomous execution.
+- Every mutation uses the same versioned command payload, capability check, idempotency key, and journal path as unattended clients.
+### 18.2 Optional local browser chart
+- `TV` / `TRADINGVIEW` MAY expose the current canonical graph through an ephemeral
+  loopback listener and open it in the system browser.
+- The page MUST be local, chart-focused, dependency-free at runtime, and fed
+  asynchronously from bounded terminal presentation snapshots.
+- The sidebar coordination terminal MUST be read-only: it may change symbol,
+  timeframe, chart style, overlays, zoom, and pan, but MUST reject order, risk,
+  autonomy, broker, strategy, metric, and configuration mutations.
+- Closing the browser MUST NOT affect the terminal or runtime. Closing the native
+  terminal MUST stop its loopback chart listener without affecting autonomous execution.
+## 19. Function model
+Every major view is a named function reachable by mnemonic plus Enter/`GO` and,
+for common functions, a function key. Required navigation includes `HOME`, `MARKET`,
+`PORT`, `ORDERS`, `STRAT`, `METRICS`, `NEWS`, `RISK`, `AUTO`, `ALERTS`, `HEALTH`,
+and `HELP`. Up/Down and PageUp/PageDown provide bounded scrolling. Escape clears
+the command line and Ctrl-C/`QUIT` exits only the terminal.
+## 20. Terminal visual system
+- near-black surfaces, orange function accents, amber labels, and tabular numerals
+- dense bordered regions and stable columns; no animation or layout shift on ticks
+- gain/loss and health states MUST include text/sign/glyph in addition to color
+- layout MUST adapt to terminal dimensions without writing outside the frame
+- stale age, connection state, account, cursor, risk state, and autonomy mode remain visible
+## 21. Required terminal functions
+- market monitor and compact OHLCV history; portfolio and reconciled positions
+- order blotter, two-stage order preview/confirmation, cancellation, and TCA
+- strategy registry, proposal monitor, lifecycle controls, and coordinator state
+- metric registry, live values/health/latency, and lifecycle controls
+- Relevant/All news, news detail, provider health, and contextual analyst
+- autonomy plan/actions, risk limits/utilization/state controls, and emergency halt
+- alerts/acknowledgement, broker/supervisor health, configuration status/reload
+- trace reconstruction, backtests, experiments, models, screener, depth/tape, and search
+## 22. Terminal chart system
+Terminal-native charts MUST provide bounded OHLCV history and fast redraws. Price,
+volume, metrics, strategies, fills, orders, and news/event markers remain separate
+typed series. Richer chart functions may use braille/block cells, but the underlying
+data and navigation must remain usable on a basic color terminal.
+## 23. Strategy terminal
+`STRAT` shows identity, mode, state, lifecycle, priority, dependencies, proposal
+count, confidence, horizon, risk usage, performance, and health. `AUTO` shows the
+active typed proposals and plan. Lifecycle changes require explicit confirmation
+and evidence references.
+## 24. AI Analyst terminal
+The analyst function is contextual, streams asynchronously, names its market/news/
+strategy context, cites authoritative internal evidence, and never blocks runtime
+refresh or execution. Trading-relevant actions remain schema validated commands.
 ## 25. Manual trader workflow
 1. User opens a workspace with Chart, Relevant News, Strategy Browser, Order Ticket, Positions, and AI Analyst.
 2. Selecting a symbol updates linked panels.
@@ -825,13 +734,13 @@ Yahoo Finance MUST be a named adapter rather than a special case in chart code.
 Charts ask the MarketData service for canonical bars; the service decides which provider supplied them.
 ## 30. CFG extensions
 CFG remains the authoritative declarative runtime configuration format.
-It MUST support new domains for strategies, providers, LLMs, UI defaults, and autonomy.
-The desktop News stale threshold MUST be configurable as `ui.news_stale_after_ms`, bounded to
+It MUST support new domains for strategies, providers, LLMs, terminal defaults, and autonomy.
+The terminal News stale threshold MUST be configurable as `terminal.news_stale_after_ms`, bounded to
 60,000–3,600,000 milliseconds with a deterministic 300,000-millisecond fallback; the generator
 MUST preserve unrelated keys and comments when merging it.
-The desktop AI Analyst freshness threshold MUST be configurable as `ui.analyst_stale_after_ms`
+The terminal AI Analyst freshness threshold MUST be configurable as `terminal.analyst_stale_after_ms`
 with the same 60,000–3,600,000 millisecond bounds and deterministic fallback.
-The desktop alert refresh cadence MUST be configurable as `ui.alert_poll_ms`, bounded to
+The terminal alert refresh cadence MUST be configurable as `terminal.alert_poll_ms`, bounded to
 500–60,000 milliseconds with a deterministic 1,000-millisecond fallback.
 Example:
 ```cfg
@@ -941,7 +850,7 @@ RootSupervisor
 Each child has restart intensity, backoff, jitter, and quarantine behavior.
 An LLM outage should degrade AI summaries/autonomy without killing manual charts or deterministic strategies.
 A NewsAPI outage should leave existing cached news and alternate providers usable.
-A UI crash should not corrupt the execution engine.
+A terminal crash should not corrupt the execution engine.
 ## 39. Scheduler and deadlines
 Metric/strategy scheduling classes: `ULTRA`, `FAST`, `STANDARD`, `BATCH`.
 Remote LLM calls belong to `STANDARD` or `BATCH`; never `ULTRA`.
@@ -984,22 +893,19 @@ Required runtime dashboards:
 - order/fill state; TCA
 - system CPU/memory/queue depth
 LLM metrics include p50/p95/p99 latency, stream-first-token latency, malformed output rate, schema validation failure rate, timeout rate, retries, cache hit rate, and tokens/cost if provider exposes usage.
-## 43. UI performance
-- virtualize large news/watchlist/tape lists; batch chart updates
-- throttle nonessential React/Solid state propagation; keep high-frequency data outside general global-store diffing
-- use Web Workers for expensive UI-only transforms; do not rerender whole workspaces on tick events
-- persist layouts asynchronously; lazy-load heavy panels
-- suspend hidden expensive charts where appropriate
-## 44. UI workspace presets
-Ship polished presets:
-- `Trading`: chart center, watchlist left, news right, order/positions bottom.; `MultiChart`: 2x2 linked charts with compact news/strategies.
-- `News`: chart + large Relevant/All News + AI Analyst.; `Strategies`: strategy browser, inspector, backtest, equity curves, metrics.
-- `Autonomy`: Autonomy Console, live proposals, risk, positions, trace timeline.; `Execution`: chart, depth, tape, order blotter, TCA.
-- `Research`: experiment browser, backtest comparison, model registry, AI Research.
-## 45. Command palette and keyboard model
-A global command palette should open with a single shortcut.
-Commands include symbol search, open panel, run strategy analysis, switch workspace, create alert, open order ticket, run backtest, inspect TraceId, and change autonomy state.
-Every core UI action SHOULD have a command ID so keyboard shortcuts and automation can invoke the same command safely.
+## 43. Terminal performance
+- redraws SHOULD remain responsive during live updates and avoid blocking input
+- large news/watchlist/tape functions MUST retain bounded data and render only visible rows
+- refresh batches MUST not overlap; terminal decoding MUST reject oversized collections and strings
+- expensive analytics remain engine-side or asynchronous and never block keyboard handling
+## 44. Terminal function presets
+Ship polished functions for Trading, MultiChart, News, Strategies, Autonomy,
+Execution, and Research. Presets are bounded presentation preferences only.
+## 45. Command and keyboard model
+The command line is always available. Mnemonics cover symbol search, functions,
+strategy analysis, alerts, order preview/confirmation, backtests, TraceId inspection,
+configuration, risk, and autonomy. Every core terminal action MUST map to a typed
+command payload so keyboard shortcuts and automation invoke the same safe path.
 ## 46. Notifications and alerts
 Alert sources:
 - price levels; metric thresholds
@@ -1019,11 +925,11 @@ Persist:
 - drawing objects; panel settings
 - strategy display preferences; manual/autonomy preferences
 - news filters; AI Analyst pinned threads/context references
-Trading state MUST NOT be reconstructed from UI persistence.
+Trading state MUST NOT be reconstructed from terminal persistence.
 ## 49. Security boundaries
 Technical security rules:
 - broker credentials only in broker/order-gateway boundary; LLM/API keys in secret storage
-- UI never receives raw secrets; production Python workers have restricted filesystem/network where practical
+- terminal clients never receive raw secrets; production Python workers have restricted filesystem/network where practical
 - provider outputs are parsed as untrusted external data; artifacts are hashed/versioned
 - service identities and least privilege are preferred
 - External provider and article URLs MUST be bounded to 2,048 bytes, use HTTPS (except
@@ -1048,39 +954,27 @@ Required news tests:
 - deduplication; cluster stability
 - symbol/entity mapping; relevance ordering
 - stale timestamps; provider outage
-Required UI tests:
-- save/restore layout; dock/float/popout
-- linked symbol propagation; chart+news synchronization
-- large-news-list virtualization; multi-monitor window restore
-- autonomy action rendering; order-ticket prefilling from proposal
-- repeated proposal and order actions MUST expose explicit accessible names containing the
-  strategy/instrument context; contract tests MUST assert the rendered template attributes
-  so dense lists remain operable without relying on visual row context.
+Required terminal tests:
+- snapshot and command wire decoding with strict bounds and trailing-byte rejection
+- mnemonic routing, function keys, scrolling, reconnect, and stale-state retry
+- large-news/tape bounded rendering and terminal resize behavior
+- autonomy/proposal rendering and two-stage manual order preview/confirmation
+- runtime continuation after terminal exit or crash
 ## 51. CI/CD additions
-- UI TypeScript lint/typecheck/test is a merge gate.; Strategy SDK compatibility tests are a merge gate.
+- Native terminal clippy/test/build is a merge gate.; Strategy SDK compatibility tests are a merge gate.
 - Schema compatibility is a merge gate.; Golden replay is a merge gate.
 - Hot-path benchmark regressions are a merge gate.; LLM provider contract tests run against a local fake OpenAI-compatible server.
-- News provider tests use recorded fixtures to avoid network nondeterminism.; Tauri build smoke tests run for target desktop platforms.
-- UI CI MUST provision the pinned Node/npm versions declared by `ui/.node-version` and
-  `ui/package.json`, run `npm ci --prefix ui`, and build from the lockfile. A cached or
-  pre-existing `node_modules` directory MUST NOT be treated as dependency installation.
+- News provider tests use recorded fixtures to avoid network nondeterminism.; Native terminal build smoke tests run for target platforms.
 - The release-candidate procedure in `docs/runbooks/release-certification.md` is normative
   for G15. It MUST be used to record immutable RC hashes, the seven-day paper soak,
   disaster drills, broker/ledger reconciliation, capability approvals, and canary evidence;
   `scripts/check_runbook.py` MUST fail if any required procedure section is removed.
-- Linux CI MUST install the WebKitGTK/JavaScriptCore development packages required by Tauri
-  and run `cargo check --manifest-path ui/src-tauri/Cargo.toml --locked` after the repository
-  gate; a passing web build alone is not desktop-build evidence.
-- `scripts/check_tauri_contract.py` MUST validate the packaged frontend path, immutable desktop
-  identity, CSP self-origin restrictions, minimum window bounds, and enabled bundling.
-- `scripts/check_cfg_generator.py` MUST fail when an active key in `config/example.cfg` is not
-  represented by the Configuration panel's generator/merge path; comments and secret-only keys
-  are not treated as generator requirements.
+- Linux CI MUST run `cargo check --locked -p insider-terminal` after the repository gate.
 ## 52. Development-agent ownership
 - **Architect Agent** — cross-component contracts and invariants.; **Metric Agent** — metric SDK/runtime and metric implementations.
 - **Strategy Agent** — strategy SDK/runtime, manifests, proposal semantics.; **Autonomy Agent** — strategy coordination and typed autonomous plans.
 - **LLM Agent** — provider adapters, tools, prompt registry, structured output.; **News Agent** — provider ingestion, dedupe, clustering, ranking.
-- **Graph Agent** — entity graph and hybrid retrieval.; **UI Agent** — Tauri bridge, workspace, panels, design system.
+- **Graph Agent** — entity graph and hybrid retrieval.; **Terminal Agent** — native client, functions, command model, rendering.
 - **Chart Agent** — renderer, panes, overlays, drawings, news/strategy markers.; **Portfolio/Risk Agent** — capital allocation and risk state.
 - **Execution Agent** — orders, brokers, reconciliation, TCA.; **Simulation Agent** — point-in-time replay and fills.
 - **Reliability Agent** — supervision, failover, chaos, capacity.
@@ -1093,13 +987,13 @@ Required UI tests:
 6. Add or update deterministic tests, negative cases, and fault cases with implementation.
 7. Run component and schema-compatibility tests; record the exact commands and results.
 8. Run golden replay whenever serialized state, time, decisions, accounting, or orders change.
-9. Run benchmarks with telemetry/journaling enabled whenever a hot path or UI stream changes.
+9. Run benchmarks with telemetry/journaling enabled whenever a hot path or terminal stream changes.
 10. Update manifests, schemas, generated bindings, migrations, runbooks, and traceability rows.
 11. Do not check a gate or acceptance item unless its same-revision evidence satisfies `PLAN.md`.
 12. Record assumptions in an ADR when they alter a contract, safety property, or production limit.
 
 Agents MUST NOT satisfy a requirement with a stub that returns success, an ignored test,
-a mock unavailable in the packaged application, or a UI element disconnected from an
+a mock unavailable in the packaged application, or a terminal function disconnected from an
 authoritative service. `todo!`, `unimplemented!`, placeholder credentials, permissive
 catch-all errors, silent fallback, and test-only production branches block completion
 of the owning requirement. Partial work remains unchecked and must state what is absent.
@@ -1148,13 +1042,13 @@ A manifest declares:
 - rate limits; timeout policy
 - retry policy; streaming support
 - health endpoint/probe; schema version
-Provider replacement SHOULD require no strategy/UI rewrites.
+Provider replacement SHOULD require no strategy/terminal rewrites.
 ## 59. Graceful degradation
 Examples:
 - LLM down → show deterministic strategy proposals and raw/ranked news.; NewsAPI down → use Yahoo/RSS/broker providers and cached feed.
 - Yahoo down → charts use broker/primary provider; Yahoo-specific context disappears.; Context graph down → direct symbol news still works.
 - Strategy worker down → other strategies continue.; Autonomy coordinator down → deterministic autonomous strategies may continue if configured; manual mode remains available.
-- UI down → execution service continues according to deployment mode.
+- Terminal down → execution service continues according to deployment mode.
 ## 60. Delivery roadmap
 `PLAN.md` is the normative, dependency-ordered implementation and certification plan
 for this specification. Its gates G00-G15 replace thematic phase completion. A gate
@@ -1165,8 +1059,8 @@ The roadmap is:
 1. reproducible repository and deterministic runtime
 2. canonical multi-asset data, metrics, strategies, replay, portfolio and risk
 3. idempotent IBKR execution, reconciliation and TCA
-4. independently restartable local services and secure UI bridge
-5. React/Tauri workstation, news, LLM intelligence, graph and autonomy
+4. independently restartable local services and secure terminal control plane
+5. native Rust terminal workstation, news, LLM intelligence, graph and autonomy
 6. packaged-system soak, disaster recovery, security and per-asset live certification
 
 Implementation agents MUST use `PLAN.md` rather than interpreting this summary as a
@@ -1188,13 +1082,13 @@ The News system is done only when G10 evidence verifies restart-safe pagination,
 immutable normalization, deterministic dedupe/clustering, point-in-time corrections,
 entity-link provenance, measured ranking quality, provider failure, virtualized feeds
 and exact content-version navigation from chart markers.
-## 64. Definition of done for UI
-The UI is done only when G09 and G14 packaged-build evidence verifies every required
-panel and state, docking/popout/layout migrations, link isolation, chart overlays,
-manual preview/confirmation/idempotency, accessibility, reconnect and stale-state
-behavior, virtualization, measured performance and crash isolation from engine state.
+## 64. Definition of done for terminal workstation
+The terminal is done only when packaged-build evidence verifies every required
+function and state, mnemonic/function-key navigation, chart and dense-table rendering,
+manual preview/confirmation/idempotency, keyboard accessibility, reconnect and stale-state
+behavior, bounded performance, resize handling, and crash isolation from engine state.
 ## 65. Final architecture invariant
-InsiderTrader is healthy when market state, metrics, strategies, decision mode, portfolio, risk, execution, reconciliation, and UI/intelligence state are separately observable and can fail independently without ambiguity.
+InsiderTrader is healthy when market state, metrics, strategies, decision mode, portfolio, risk, execution, reconciliation, and terminal/intelligence state are separately observable and can fail independently without ambiguity.
 The system should be understood as:
 ```text
 a trading engine
@@ -1210,19 +1104,18 @@ It must amplify InsiderTrader's capabilities without becoming the foundation on 
 As of the current design research:
 - The official OpenAI Python client supports configurable `base_url`, making an OpenAI-compatible provider abstraction practical.; The OpenAI Python project describes the Responses API as its primary model interaction API, while Chat Completions remains available.
 - NewsAPI documents `/v2/everything` for article discovery and `/v2/top-headlines` for live headline use cases.; Community Yahoo Finance clients currently use `/v8/finance/chart/{symbol}` for OHLCV and `/v1/finance/search` for quote/news search.
-- Tauri 2 supports frontend-framework flexibility and multiple desktop windows.; Dockview supports docked tabs, resizable groups, floating groups, popout windows, and serialized layout restore.
-- TradingView Lightweight Charts supports multiple panes and plugin/custom-series primitives suitable for strategy/news overlays.
-These details belong behind provider/UI adapters so future API/library changes do not rewrite the trading core.
+- Ratatui and Crossterm provide native terminal rendering and input without a browser/WebView runtime.
+These details belong behind provider/terminal adapters so future API/library changes do not rewrite the trading core.
 ## Appendix B — Normative acceptance catalogue
 These are atomic requirements, not implementation tasks. Checking one asserts that
 its row in `evidence/requirements.csv` names an automated verification, that the
 verification passed against a packaged system at the same source revision, and that
 the result is referenced by the owning G00-G15 gate evidence in `PLAN.md`.
 
-No item may be checked based only on code inspection, a mocked happy path, a UI
+No item may be checked based only on code inspection, a mocked happy path, a terminal
 screenshot, or the existence of a type/crate/panel. Provider-related items require
 recorded contract fixtures plus outage/error cases. Trading-related items require
-replay, restart and idempotency coverage. UI items require packaged Tauri end-to-end
+replay, restart and idempotency coverage. Terminal items require packaged native end-to-end
 tests and applicable performance/accessibility measurements. When a regression is
 confirmed, the item and its owning gate are invalidated until the same verification
 passes again.
@@ -1255,15 +1148,15 @@ passes again.
 - [ ] A026 Every chart can request symbol/timeframe-specific news context.
 - [ ] A027 Context graph queries can link issuer, instrument, event, metric, strategy, and portfolio nodes.
 - [ ] A028 Hybrid graph/vector retrieval records the embedding model/version used.
-- [ ] A029 Tauri desktop app restores a saved workspace without changing trading state.
-- [ ] A030 Panels can dock, tab, split, float, pop out, and be restored.
-- [ ] A031 Link groups synchronize symbol/timeframe only when panels share the same link ID.
-- [ ] A032 Chart rendering supports multiple panes and strategy/news overlays.
-- [ ] A033 Chart news markers open the exact linked news/event object.
-- [ ] A034 Long news/watchlist/tape views use virtualization.
-- [ ] A035 Glass effects are benchmarked so blur does not degrade chart interaction materially.
-- [ ] A036 UI crash cannot corrupt the order journal or broker state.
-- [ ] A037 Manual proposal cards can prefill an order/target ticket without submitting it.
+- [ ] A029 Native terminal restores presentation preferences without changing trading state.
+- [ ] A030 Every required function is reachable by mnemonic and keyboard-only navigation.
+- [ ] A031 Symbol/timeframe context propagates only through explicit terminal selection state.
+- [ ] A032 Terminal chart rendering supports price, volume, strategy, and news series.
+- [ ] A033 Chart news markers resolve the exact linked news/event object.
+- [ ] A034 Long news/watchlist/tape functions use bounded visible-row rendering.
+- [ ] A035 Terminal redraw and input latency meet the documented performance targets.
+- [ ] A036 Terminal crash cannot corrupt the order journal or broker state.
+- [ ] A037 Manual proposals can prefill an order/target preview without submitting it.
 - [ ] A038 Autonomy Console displays current plan, selected proposals, provider/model, and next reconsideration.
 - [ ] A039 Point-in-time replay never exposes news before its recorded availability timestamp.
 - [ ] A040 Historical LLM outputs are replayed from pinned/cache artifacts when deterministic validation requires it.

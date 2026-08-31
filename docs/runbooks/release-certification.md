@@ -7,17 +7,18 @@ operator assertion without the artifacts below.
 
 ## 1. Freeze the release candidate
 
-1. Record the 40-character source revision, Rust/Node/npm versions, binary hashes,
-   `Cargo.lock`, `ui/package-lock.json`, schema bundle hash, and deployment CFG hash.
-2. Run `npm ci --prefix ui` and `./scripts/check.sh` from a clean checkout. Store the
+1. Record the 40-character source revision, Rust/Python versions, binary hashes,
+   `Cargo.lock`, schema bundle hash, and deployment CFG hash.
+2. Run `cargo build --locked -p insider-runtime -p insider-terminal` and
+   `./scripts/check.sh` from a clean checkout. Store the
    complete log and exit code under the release evidence directory.
-3. Build the packaged desktop artifact and calculate SHA-256 hashes. Verify the
+3. Build the native runtime and terminal artifacts and calculate SHA-256 hashes. Verify the
    hashes again after copying to the test host; a mismatch invalidates the RC.
 
 ## 2. Seven-day paper soak
 
 Run the RC continuously for seven calendar days with market/news ingestion, metrics,
-strategies, UI sessions, research jobs, and configured LLM workloads enabled. Capture
+strategies, terminal sessions, research jobs, and configured LLM workloads enabled. Capture
 hourly snapshots of RSS, queue depth, journal sequence, provider health, supervisor
 state, risk state, orders, fills, positions, and account values. The signed report must
 show zero duplicate orders, unreconciled final positions, silent data gaps, journal
@@ -30,7 +31,7 @@ Execute each drill independently, recording UTC start/end, injected fault, Trace
 expected fail-closed behavior, recovery time, final journal/projection hashes, and
 reconciliation result:
 
-- kill the UI while paper execution remains active;
+- kill the terminal while paper execution remains active;
 - terminate the engine, reboot the host, and recover from a damaged journal tail;
 - simulate disk-full warning, network partition, IBKR disconnect, and clock anomaly;
 - disable market, news, and LLM providers; corrupt a rebuildable cache;

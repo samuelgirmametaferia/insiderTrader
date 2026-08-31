@@ -420,6 +420,7 @@ fn parse_strategy_manifest(
     let mut entrypoint = None;
     let mut mode = None;
     let mut metrics = Vec::new();
+    let mut missing_evidence = insider_strategy_sdk::MissingEvidencePolicy::SkipEvaluation;
     let mut dependencies = Vec::new();
     let mut horizon = None;
     let mut ttl = None;
@@ -453,6 +454,13 @@ fn parse_strategy_manifest(
                 });
             }
             "metrics" | "metric_ids" => metrics = parse_list(value)?,
+            "missing_evidence" => {
+                missing_evidence = match value.to_ascii_lowercase().as_str() {
+                    "skip" => insider_strategy_sdk::MissingEvidencePolicy::SkipEvaluation,
+                    "no_action" => insider_strategy_sdk::MissingEvidencePolicy::EvaluateNoAction,
+                    _ => return Err("missing_evidence must be skip or no_action".into()),
+                };
+            }
             "dependencies" | "strategy_dependencies" => dependencies = parse_list(value)?,
             "horizon_ns" => horizon = Some(parse_positive(value, key)?),
             "ttl_ns" => ttl = Some(parse_positive(value, key)?),
@@ -473,6 +481,7 @@ fn parse_strategy_manifest(
         strategy_id: id.ok_or("missing id")?,
         mode: mode.ok_or("missing mode")?,
         metric_ids: metrics,
+        missing_evidence,
         strategy_dependencies: dependencies,
         horizon_ns: horizon.ok_or("missing horizon_ns")?,
         ttl_ns: ttl.ok_or("missing ttl_ns")?,
@@ -993,7 +1002,10 @@ mod tests {
     use std::sync::Arc;
 
     use insider_common_types::{InstrumentId, MonoTime, ProposalId};
-    use insider_strategy_sdk::{Action, Proposal, ProposalError, Strategy, StrategyContext};
+    use insider_strategy_sdk::{
+        Action, Proposal, ProposalError, Strategy, StrategyContext, VolatilityScaledTrendConfig,
+        VolatilityScaledTrendStrategy,
+    };
 
     use super::{DiscoveryError, Host, HostError, Lifecycle, State, discover_strategy_packages};
 
@@ -1150,5 +1162,42 @@ mod tests {
             host.evaluate("shadow.v1", &context),
             Err(HostError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn packaged_starter_strategy_is_discoverable_and_matches_builtin_adapter() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../strategies/rust/starter");
+        let Ok(discovered) = discover_strategy_packages(root) else {
+            return;
+        };
+        assert_eq!(discovered.len(), 1);
+        let package = &discovered[0];
+        let config = VolatilityScaledTrendConfig {
+            strategy_id: String::from("cross_asset.volatility_scaled_trend.v1"),
+            trend_metric_id: String::from("trend.ema.normalized.v1"),
+            volatility_metric_id: String::from("volatility.atr.normalized.v1"),
+            spread_metric_id: String::from("liquidity.spread.v1"),
+            entry_threshold: 0.002,
+            exit_threshold: 0.0005,
+            max_spread: 0.0025,
+            target_volatility: 0.015,
+            min_confidence: 0.65,
+            base_quantity_ticks: 10,
+            horizon_ns: 900_000_000_000,
+            ttl_ns: 5_000_000_000,
+        };
+        let Some(strategy) = VolatilityScaledTrendStrategy::new(config) else {
+            return;
+        };
+        let mut host = Host::new(2);
+        assert!(
+            host.register_discovered(package, |_| Ok(Arc::new(strategy)))
+                .is_ok()
+        );
+        assert_eq!(
+            host.strategy_ids(),
+            vec![String::from("cross_asset.volatility_scaled_trend.v1")]
+        );
     }
 }

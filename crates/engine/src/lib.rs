@@ -18,7 +18,7 @@ use insider_autonomy::{
 use insider_broker_api::{
     BrokerEvent, BrokerGateway, BrokerHealth, BrokerSnapshot, OrderState, OrderType, Side,
 };
-use insider_cfg_core::{ConfigStore, ReloadError, Settings, Snapshot};
+use insider_cfg_core::{ConfigStore, ReloadError, Settings, Snapshot, Value};
 use insider_common_types::{AccountId, InstrumentId, MonoTime, ProposalId, TraceId};
 use insider_context_graph::{
     Edge, EdgeFact, EmbeddingError, EmbeddingIndex, EmbeddingIndexSnapshot, EmbeddingRecord, Graph,
@@ -71,7 +71,8 @@ use insider_strategy_coordinator::{
 };
 use insider_strategy_host::{DiscoveredStrategy, Host as StrategyHost};
 use insider_strategy_sdk::{
-    Action, Proposal, ProposalError, Strategy, StrategyContext, StrategyManifest, ThresholdStrategy,
+    Action, MissingEvidencePolicy, Proposal, ProposalError, Strategy, StrategyContext,
+    StrategyManifest, ThresholdStrategy,
 };
 use insider_supervisor::{Health as SupervisorHealth, Policy as SupervisorPolicy, Supervisor};
 
@@ -778,7 +779,7 @@ pub struct ReconcileSummary {
     pub snapshot_account_values: usize,
 }
 
-/// Authoritative runtime snapshot served to UI/read-model clients.
+/// Authoritative runtime snapshot served to terminal/read-model clients.
 ///
 /// The journal cursor is part of the snapshot contract: a client must apply
 /// only deltas strictly after this cursor and request a fresh snapshot on gaps.
@@ -793,7 +794,13 @@ pub struct RuntimeSnapshot {
     /// Durable manual/hybrid/autonomous decision mode.
     pub autonomy_mode: AutonomyMode,
     /// Most recently generated autonomous plan, if one exists.
-    pub autonomy_plan: Option<(String, PlanState, u64)>,
+    pub autonomy_plan: Option<AutonomyPlanSnapshot>,
+    /// Currently installed LLM provider identity. This is runtime
+    /// configuration, not plan-bound provenance.
+    pub llm_provider_id: Option<String>,
+    /// Currently configured LLM model. This is runtime configuration, not
+    /// plan-bound provenance.
+    pub llm_model: Option<String>,
     /// Reconciled portfolio projection.
     pub portfolio: Portfolio,
     /// Stable order projection records.
@@ -816,6 +823,21 @@ pub struct RuntimeSnapshot {
     pub largest_position_notional_ticks: i128,
     /// Peak-to-equity drawdown, if a positive high-water mark exists.
     pub drawdown_bps: Option<i64>,
+}
+
+/// Bounded autonomous-plan detail exposed to control-plane clients.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutonomyPlanSnapshot {
+    /// Stable plan identity.
+    pub plan_id: String,
+    /// Durable lifecycle state.
+    pub state: PlanState,
+    /// Monotonic generation timestamp.
+    pub generated_at_ns: u64,
+    /// Monotonic hard expiry timestamp.
+    pub expires_at_ns: u64,
+    /// Schema-validated finite actions retained by the plan store.
+    pub actions: Vec<AutonomousAction>,
 }
 
 /// Journal evidence associated with one trading trace.
@@ -1096,6 +1118,21 @@ pub struct AlertRecord {
 
 const MAX_RUNTIME_FILLS: usize = 10_000;
 
+fn action_type_name(action: ActionType) -> &'static str {
+    match action {
+        ActionType::ExecuteProposal => "EXECUTE_PROPOSAL",
+        ActionType::ExecuteProposalScaled => "EXECUTE_PROPOSAL_SCALED",
+        ActionType::IgnoreProposal => "IGNORE_PROPOSAL",
+        ActionType::PauseStrategy => "PAUSE_STRATEGY",
+        ActionType::ResumeStrategy => "RESUME_STRATEGY",
+        ActionType::RequestReanalysis => "REQUEST_REANALYSIS",
+        ActionType::AddToWatch => "ADD_TO_WATCH",
+        ActionType::RemoveFromWatch => "REMOVE_FROM_WATCH",
+        ActionType::ReduceAutonomy => "REDUCE_AUTONOMY",
+        ActionType::NoAction => "NO_ACTION",
+    }
+}
+
 /// Read-only manual-order preview bound to the journal state version.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManualOrderPreview {
@@ -1119,12 +1156,13 @@ pub struct ManualOrderPreview {
     pub warnings: Vec<String>,
 }
 
-/// Durable headless service host used by both Tauri and unattended deployments.
+/// Durable headless service host used by terminal and unattended deployments.
 pub struct ServiceHost {
     started: Instant,
     runtime: Arc<Runtime>,
     journal: Journal,
     _writer_lock: JournalWriterLock,
+    append_lock: Mutex<()>,
     config: ConfigStore,
     lifecycle: Mutex<Lifecycle>,
     autonomy_plans: Mutex<PlanStore>,
@@ -1640,6 +1678,7 @@ impl ServiceHost {
             runtime,
             journal,
             _writer_lock: writer_lock,
+            append_lock: Mutex::new(()),
             config: ConfigStore::new(settings),
             lifecycle: Mutex::new(Lifecycle::Reconciling),
             autonomy_plans: Mutex::new(autonomy_plans),
@@ -2456,8 +2495,18 @@ impl ServiceHost {
                 );
             }
             if let Some(bar) = snapshot.bars.last() {
+                features.insert("open_price".into(), ticks_to_feature(bar.open_ticks));
+                features.insert("high_price".into(), ticks_to_feature(bar.high_ticks));
+                features.insert("low_price".into(), ticks_to_feature(bar.low_ticks));
                 features.insert("close_price".into(), ticks_to_feature(bar.close_ticks));
                 features.insert("volume".into(), ticks_to_feature(bar.volume_ticks));
+                if let Ok(interval_ns) = i64::try_from(bar.interval_ns)
+                    && interval_ns > 0
+                    && let Ok(index) =
+                        i32::try_from(bar.start_time.as_unix_nanos().div_euclid(interval_ns))
+                {
+                    features.insert("bar_index".into(), f64::from(index));
+                }
                 if let Some(previous) = snapshot.bars.iter().rev().nth(1)
                     && previous.close_ticks > 0
                 {
@@ -2535,12 +2584,18 @@ impl ServiceHost {
                 .collect::<Vec<_>>();
             metrics.extend(cached_outputs);
             for strategy_id in &strategy_ids {
-                let (metric_ids_for_strategy, period_ns) = self
+                let (required_metrics, missing_evidence, period_ns) = self
                     .strategy_host
                     .lock()
                     .map_err(|_| EngineError::Poisoned)?
                     .manifest(strategy_id)
-                    .map(|manifest| (manifest.metric_ids.clone(), manifest.period_ns))
+                    .map(|manifest| {
+                        (
+                            manifest.metric_ids.clone(),
+                            manifest.missing_evidence,
+                            manifest.period_ns,
+                        )
+                    })
                     .ok_or_else(|| EngineError::Strategy("strategy disappeared".into()))?;
                 let strategy_key = (strategy_id.clone(), snapshot.instrument_id.get());
                 if self
@@ -2552,12 +2607,16 @@ impl ServiceHost {
                 {
                     continue;
                 }
-                if metric_ids_for_strategy
+                let incomplete = required_metrics
                     .iter()
-                    .any(|required| !metrics.iter().any(|metric| &metric.metric_id == required))
-                {
+                    .any(|required| !metrics.iter().any(|metric| &metric.metric_id == required));
+                if incomplete && missing_evidence == MissingEvidencePolicy::SkipEvaluation {
                     continue;
                 }
+                // Only packages that explicitly declare the typed no-action
+                // policy receive incomplete snapshots. Legacy/native/Python
+                // implementations retain skip behavior and cannot abort the
+                // cycle merely because an input is unavailable.
                 let context = StrategyContext {
                     now,
                     instrument_id: snapshot.instrument_id,
@@ -2944,7 +3003,7 @@ impl ServiceHost {
             .collect()
     }
 
-    /// Returns one coordinator record for UI/strategy diagnostics without
+    /// Returns one coordinator record for terminal/strategy diagnostics without
     /// exposing coordinator mutation.
     #[must_use]
     pub fn strategy_proposal_record(&self, proposal_id: ProposalId) -> Option<ProposalRecord> {
@@ -3257,12 +3316,29 @@ impl ServiceHost {
             .lock()
             .map_err(|_| EngineError::Poisoned)?
             .latest()
-            .map(|record| {
-                (
-                    record.plan.plan_id.clone(),
-                    record.state,
-                    record.plan.expires_at.as_nanos(),
-                )
+            .map(|record| AutonomyPlanSnapshot {
+                plan_id: record.plan.plan_id.clone(),
+                state: record.state,
+                generated_at_ns: record.plan.generated_at.as_nanos(),
+                expires_at_ns: record.plan.expires_at.as_nanos(),
+                actions: record.plan.actions.clone(),
+            });
+        snapshot.llm_provider_id = self
+            .llm_provider
+            .lock()
+            .map_err(|_| EngineError::Poisoned)?
+            .as_ref()
+            .and_then(|provider| provider.manifest())
+            .map(|manifest| manifest.provider_id);
+        snapshot.llm_model = self
+            .config
+            .snapshot()
+            .map_err(|_| EngineError::Poisoned)?
+            .settings
+            .get("llm.model")
+            .and_then(|value| match value {
+                Value::String(model) if !model.trim().is_empty() => Some(model.clone()),
+                _ => None,
             });
         Ok(snapshot)
     }
@@ -4488,6 +4564,11 @@ impl ServiceHost {
     /// # Errors
     /// Returns [`EngineError::Journal`] when the append or stable sync fails.
     pub fn append_event(&self, payload: &[u8]) -> Result<u64, EngineError> {
+        // Journal and rebuildable projection form one ordered publication
+        // boundary. Provider, scheduler, and IPC threads may all emit events;
+        // serialize the pair so two projection appends cannot read the same
+        // header count and corrupt the projection.
+        let _append_guard = self.append_lock.lock().map_err(|_| EngineError::Poisoned)?;
         let sequence = self.journal.append(payload).map_err(EngineError::Journal)?;
         self.read_model
             .append_record(&insider_journal::Record {
@@ -5193,7 +5274,40 @@ impl ServiceHost {
         }
         let action = parse_autonomous_action(&response.content).map_err(EngineError::Llm)?;
         action.validate().map_err(EngineError::Llm)?;
+        if matches!(
+            action.action_type,
+            ActionType::PauseStrategy | ActionType::ReduceAutonomy
+        ) || action.reason_codes.iter().any(|code| {
+            let code = code.to_ascii_uppercase();
+            code.contains("ALERT") || code.contains("LIQUID") || code.contains("MARGIN")
+        }) {
+            self.publish_llm_alert(request, &action);
+        }
         Ok(action)
+    }
+
+    fn publish_llm_alert(&self, request: &LlmRequest, action: &AutonomousAction) {
+        let occurred_ms =
+            i64::try_from(self.monotonic_now().as_nanos() / 1_000_000).unwrap_or(i64::MAX);
+        let reason = action.reason_codes.join(", ");
+        let message = format!(
+            "AI control alert [{}]: {}",
+            action_type_name(action.action_type),
+            reason
+        );
+        let alert = Alert {
+            alert_id: format!("llm-alert-{}", request.trace_id),
+            dedupe_key: format!("llm-alert:{}", action_type_name(action.action_type)),
+            source: "llm-autonomy".into(),
+            occurred_ms,
+            severity: AlertSeverity::Critical,
+            message,
+            sensitive: false,
+        };
+        let _ = self.append_event(&encode_alert(&alert));
+        if let Ok(mut router) = self.alerts.lock() {
+            let _ = router.route(alert, AlertChannel::InApp, occurred_ms);
+        }
     }
 
     /// Requests cancellation through the normal durable order lifecycle.
@@ -5660,7 +5774,7 @@ impl ServiceHost {
         // The broker snapshot is authoritative for positions and cash. Apply it
         // after order lifecycle reconciliation so replaying fill events cannot
         // double-count quantities already reflected by the snapshot.
-        self.append_event(&encode_portfolio_snapshot(&snapshot))?;
+        self.append_event(&encode_portfolio_snapshot(&snapshot)?)?;
         self.runtime.apply_broker_snapshot(&snapshot)?;
         index_portfolio_in_graph(
             &mut *self
@@ -6383,6 +6497,8 @@ impl Runtime {
             risk_state,
             autonomy_mode: AutonomyMode::Manual,
             autonomy_plan: None,
+            llm_provider_id: None,
+            llm_model: None,
             portfolio,
             orders,
             fills: self
@@ -8235,7 +8351,7 @@ fn encode_autonomy_mode(mode: AutonomyMode) -> Vec<u8> {
     ]
 }
 
-fn encode_portfolio_snapshot(snapshot: &BrokerSnapshot) -> Vec<u8> {
+fn encode_portfolio_snapshot(snapshot: &BrokerSnapshot) -> Result<Vec<u8>, EngineError> {
     let mut output = Vec::new();
     output.extend_from_slice(b"IT_PORTFOLIO_SNAPSHOT_V1\0");
     output.extend_from_slice(
@@ -8250,10 +8366,12 @@ fn encode_portfolio_snapshot(snapshot: &BrokerSnapshot) -> Vec<u8> {
     let cash = snapshot
         .account_values
         .get(insider_broker_api::ACCOUNT_VALUE_CASH_TICKS)
-        .copied();
+        .map(|value| i64::try_from(*value).map_err(|_| AccountingError::Overflow))
+        .transpose()
+        .map_err(EngineError::Accounting)?;
     output.push(u8::from(cash.is_some()));
     output.extend_from_slice(&cash.unwrap_or_default().to_le_bytes());
-    output
+    Ok(output)
 }
 
 fn encode_portfolio_peak(peak: Option<i128>) -> Vec<u8> {
@@ -9921,7 +10039,20 @@ fn decode_journal_payload(payload: &[u8]) -> Result<Option<RecoveredEvent>, Engi
         if has_cash > 1 {
             return Err(journal_corrupt());
         }
-        let cash_ticks = read_i64(payload, &mut cursor).ok_or_else(journal_corrupt)?;
+        // Early V1 writers accidentally serialized the broker's i128 account
+        // value even though the authoritative portfolio accepts i64 cash
+        // ticks. Accept that exact legacy width on recovery, but reject values
+        // that could never have been applied to the portfolio. New writers
+        // always emit the canonical i64 representation.
+        let remaining = payload.len().saturating_sub(cursor);
+        let cash_ticks = if remaining == 8 {
+            read_i64(payload, &mut cursor).ok_or_else(journal_corrupt)?
+        } else if remaining == 16 {
+            i64::try_from(read_i128(payload, &mut cursor).ok_or_else(journal_corrupt)?)
+                .map_err(|_| journal_corrupt())?
+        } else {
+            return Err(journal_corrupt());
+        };
         if cursor != payload.len() {
             return Err(journal_corrupt());
         }
@@ -9964,7 +10095,7 @@ mod tests {
         configured_supervisor_policy,
     };
     use insider_autonomy::TradingEnvironment;
-    use insider_broker_api::{BrokerEvent, BrokerGateway, Capabilities};
+    use insider_broker_api::{BrokerEvent, BrokerGateway, BrokerSnapshot, Capabilities};
     use insider_cfg_core::{Settings, Value};
     use insider_common_types::{AccountId, InstrumentId, MonoTime, ProposalId, TraceId};
     use insider_exchange_sim::PaperBroker;
@@ -9972,7 +10103,7 @@ mod tests {
         Artifact, ExperimentBundle, ExperimentProvenance, ExperimentRun, RunStatus,
     };
     use insider_market_data::{Bar, BarUpdate, MarketEvent};
-    use insider_metric_sdk::MetricOutput;
+    use insider_metric_sdk::{MetricOutput, SpreadMetric};
     use insider_model_registry::{ArtifactManifest, ModelRecord, Status as ModelStatus};
     use insider_news_core::{
         CursorProvider, NewsItem, ProviderBatch, ProviderHealth, ProviderStateSnapshot, RetryClass,
@@ -9980,9 +10111,50 @@ mod tests {
     };
     use insider_portfolio::Portfolio;
     use insider_risk_engine::{Limits, RiskEngine};
-    use insider_strategy_sdk::{Action, Proposal, ThresholdStrategy};
+    use insider_strategy_sdk::{
+        Action, MissingEvidencePolicy, Proposal, ProposalError, Strategy, StrategyContext,
+        StrategyManifest, StrategyMode, StrategyPriority, ThresholdStrategy,
+        VolatilityScaledTrendConfig, VolatilityScaledTrendStrategy,
+    };
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn portfolio_snapshot_encoding_is_canonical_and_recovers_legacy_wide_cash() -> Result<(), String>
+    {
+        let snapshot = BrokerSnapshot {
+            account_values: BTreeMap::from([(
+                insider_broker_api::ACCOUNT_VALUE_CASH_TICKS.to_owned(),
+                250_000_i128,
+            )]),
+            ..BrokerSnapshot::default()
+        };
+        let encoded = super::encode_portfolio_snapshot(&snapshot)
+            .map_err(|error| format!("encode bounded cash: {error:?}"))?;
+        assert_eq!(
+            encoded.len(),
+            b"IT_PORTFOLIO_SNAPSHOT_V1\0".len() + 4 + 1 + 8
+        );
+        let Some(super::RecoveredEvent::PortfolioSnapshot { cash_ticks, .. }) =
+            super::decode_journal_payload(&encoded)
+                .map_err(|error| format!("decode canonical snapshot: {error:?}"))?
+        else {
+            return Err("canonical snapshot did not decode as a portfolio snapshot".into());
+        };
+        assert_eq!(cash_ticks, Some(250_000));
+
+        let mut legacy = encoded[..encoded.len() - 8].to_vec();
+        legacy.extend_from_slice(&250_000_i128.to_le_bytes());
+        let Some(super::RecoveredEvent::PortfolioSnapshot { cash_ticks, .. }) =
+            super::decode_journal_payload(&legacy)
+                .map_err(|error| format!("decode legacy snapshot: {error:?}"))?
+        else {
+            return Err("legacy snapshot did not decode as a portfolio snapshot".into());
+        };
+        assert_eq!(cash_ticks, Some(250_000));
+        Ok(())
+    }
 
     #[test]
     fn subsystem_id_is_non_empty_and_ascii() {
@@ -11003,6 +11175,129 @@ mod tests {
                 .map(|snapshot| snapshot.bars),
             Some(vec![bar])
         );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("read-model"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn decision_cycle_only_sends_incomplete_evidence_to_opted_in_strategies() {
+        struct FailIfCalled {
+            called: Arc<AtomicBool>,
+        }
+
+        impl Strategy for FailIfCalled {
+            fn strategy_id(&self) -> &'static str {
+                "legacy.requires.complete.v1"
+            }
+
+            fn manifest(&self) -> StrategyManifest {
+                StrategyManifest {
+                    strategy_id: self.strategy_id().to_owned(),
+                    mode: StrategyMode::Deterministic,
+                    metric_ids: vec![String::from("metric.never.available.v1")],
+                    missing_evidence: MissingEvidencePolicy::SkipEvaluation,
+                    strategy_dependencies: Vec::new(),
+                    horizon_ns: 1_000_000_000,
+                    ttl_ns: 100_000_000,
+                    period_ns: 100_000_000,
+                    deadline_ns: 10_000_000,
+                    priority: StrategyPriority::Fast,
+                }
+            }
+
+            fn evaluate(&self, _context: &StrategyContext<'_>) -> Result<Proposal, ProposalError> {
+                self.called.store(true, Ordering::SeqCst);
+                Err(ProposalError::InvalidAction)
+            }
+        }
+
+        let Some(account) = AccountId::new(106).ok() else {
+            return;
+        };
+        let Some(instrument) = InstrumentId::new(107).ok() else {
+            return;
+        };
+        let Some(proposal_id) = ProposalId::new(1).ok() else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "insider-engine-incomplete-evidence-{}.journal",
+            std::process::id()
+        ));
+        let broker = Arc::new(PaperBroker::new());
+        let limits = Limits {
+            max_position_ticks: 100,
+            max_order_ticks: 100,
+            max_gross_notional_ticks: 100_000,
+        };
+        let Ok(host) = ServiceHost::open(
+            &path,
+            account,
+            broker,
+            Portfolio::new(),
+            RiskEngine::new(limits),
+            BTreeMap::new(),
+        ) else {
+            return;
+        };
+        assert!(host.register_market_instrument(instrument).is_ok());
+        let received_mono = host.monotonic_now();
+        assert!(
+            host.ingest_market_event(
+                MarketEvent::Quote(insider_market_data::Quote {
+                    instrument_id: instrument,
+                    sequence: 1,
+                    exchange_time: insider_common_types::WallTime::from_unix_nanos(1),
+                    received_mono,
+                    bid_ticks: 99,
+                    ask_ticks: 101,
+                    bid_quantity_ticks: 10,
+                    ask_quantity_ticks: 10,
+                }),
+                insider_common_types::WallTime::from_unix_nanos(2),
+            )
+            .is_ok()
+        );
+        let Ok(spread) = SpreadMetric::new(String::from("spread.v1"), 1_000_000_000) else {
+            return;
+        };
+        assert!(host.register_metric(Arc::new(spread)).is_ok());
+        let called = Arc::new(AtomicBool::new(false));
+        assert!(
+            host.register_strategy(Arc::new(FailIfCalled {
+                called: Arc::clone(&called),
+            }))
+            .is_ok()
+        );
+        let Some(starter) = VolatilityScaledTrendStrategy::new(VolatilityScaledTrendConfig {
+            strategy_id: String::from("starter.no-action.v1"),
+            trend_metric_id: String::from("trend.missing.v1"),
+            volatility_metric_id: String::from("atr.missing.v1"),
+            spread_metric_id: String::from("spread.v1"),
+            entry_threshold: 0.01,
+            exit_threshold: 0.002,
+            max_spread: 0.05,
+            target_volatility: 0.01,
+            min_confidence: 0.5,
+            base_quantity_ticks: 10,
+            horizon_ns: 1_000_000_000,
+            ttl_ns: 100_000_000,
+        }) else {
+            return;
+        };
+        assert!(host.register_strategy(Arc::new(starter)).is_ok());
+        assert_eq!(host.run_registered_python_cycle().ok(), Some(1));
+        assert!(!called.load(Ordering::SeqCst));
+        let record = host.strategy_proposal_record(proposal_id);
+        assert!(record.is_some_and(|record| {
+            matches!(record.proposal.action, Action::NoAction)
+                && record
+                    .proposal
+                    .evidence
+                    .iter()
+                    .any(|item| item == "rationale:MISSING_OR_STALE_EVIDENCE")
+        }));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("read-model"));
     }

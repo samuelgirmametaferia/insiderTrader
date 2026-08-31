@@ -1,0 +1,13 @@
+# Built-in Rust adapter: insider_strategy_sdk::VolatilityScaledTrendStrategy.
+strategy:
+id: cross_asset.volatility_scaled_trend.v1
+language: rust
+mode: deterministic
+metrics: [trend.ema.normalized.v1, volatility.atr.normalized.v1, liquidity.spread.v1]
+missing_evidence: no_action
+dependencies: []
+horizon_ns: 900000000000
+ttl_ns: 5000000000
+period_ns: 5000000000
+deadline_ns: 10000000
+priority: fast

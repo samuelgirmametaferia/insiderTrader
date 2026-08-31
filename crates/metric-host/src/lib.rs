@@ -978,7 +978,10 @@ mod tests {
     use std::sync::Arc;
 
     use insider_common_types::{InstrumentId, MonoTime};
-    use insider_metric_sdk::{Metric, MetricContext, MetricDescriptor, MetricError, MetricOutput};
+    use insider_metric_sdk::{
+        Metric, MetricContext, MetricDescriptor, MetricError, MetricOutput,
+        NormalizedAverageTrueRange, NormalizedEmaTrend, SpreadMetric,
+    };
 
     use super::{DiscoveryError, Host, HostError, Lifecycle, State, discover_metric_packages};
 
@@ -1162,5 +1165,47 @@ mod tests {
             Err(DiscoveryError::Io(_))
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn packaged_starter_metrics_are_discoverable_and_match_builtin_adapters() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../metrics/rust/starter");
+        let Ok(discovered) = discover_metric_packages(root) else {
+            return;
+        };
+        assert_eq!(discovered.len(), 3);
+        let mut host = Host::new(2);
+        for package in &discovered {
+            let id = package.manifest.descriptor.metric_id.as_str();
+            let implementation: Result<Arc<dyn Metric>, HostError> = match id {
+                "trend.ema.normalized.v1" => {
+                    NormalizedEmaTrend::new(id.to_owned(), 8, 21, 5_000_000_000)
+                        .map(|metric| Arc::new(metric) as Arc<dyn Metric>)
+                        .map_err(|_| HostError::InvalidManifest(id.to_owned()))
+                }
+                "volatility.atr.normalized.v1" => {
+                    NormalizedAverageTrueRange::new(id.to_owned(), 14, 5_000_000_000)
+                        .map(|metric| Arc::new(metric) as Arc<dyn Metric>)
+                        .map_err(|_| HostError::InvalidManifest(id.to_owned()))
+                }
+                "liquidity.spread.v1" => SpreadMetric::new(id.to_owned(), 5_000_000_000)
+                    .map(|metric| Arc::new(metric) as Arc<dyn Metric>)
+                    .map_err(|_| HostError::InvalidManifest(id.to_owned())),
+                _ => Err(HostError::InvalidManifest(id.to_owned())),
+            };
+            assert!(
+                host.register_discovered(package, |_| implementation)
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            host.metric_ids(),
+            vec![
+                String::from("liquidity.spread.v1"),
+                String::from("trend.ema.normalized.v1"),
+                String::from("volatility.atr.normalized.v1"),
+            ]
+        );
     }
 }

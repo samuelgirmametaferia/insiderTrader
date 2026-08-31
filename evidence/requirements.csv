@@ -2,15 +2,15 @@ requirement_id,agents_section,normative_text,owner_gate,verification_id,status,e
 REQ-JOURNAL-001,AGENTS 3;12,"Journal records are checksummed, sealed, recoverable, and authoritative for execution state.",G01,verify-journal-tests,verified,crates/journal/src/lib.rs
 REQ-IPC-001,AGENTS 3;18,"Commands are bounded, capability-authorized, versioned, and idempotent.",G08,verify-ipc-dispatcher,verified,crates/ipc/src/lib.rs
 REQ-OPS-RELEASE-RUNBOOK-001,PLAN G15;AGENTS 51,"Release certification procedure defines RC hashing, seven-day soak, disaster drills, broker reconciliation, canary approvals, and immutable evidence manifest.",G15,verify-release-certification-runbook,verified,docs/runbooks/release-certification.md
-REQ-UI-TAURI-CONTRACT-001,AGENTS 51,"Packaged Tauri shell retains the locked frontend path, self-origin CSP, desktop identity, window bounds, and enabled bundling.",G09,verify-tauri-contract,verified,scripts/check_tauri_contract.py
-REQ-CFG-GENERATOR-COVERAGE-001,AGENTS 51,"Every active example CFG key is represented by the configuration generator or merge path.",G09,verify-cfg-generator-coverage,verified,scripts/check_cfg_generator.py
+REQ-TERMINAL-NATIVE-001,AGENTS 18;51,"Native Rust terminal builds without a browser, WebView, Node, npm, or Tauri dependency.",G09,verify-terminal-native,implemented,crates/terminal/Cargo.toml
+REQ-CFG-TERMINAL-RELOAD-001,AGENTS 21,"Terminal configuration reload streams a bounded file and uses the engine compare-and-swap command.",G09,verify-terminal-config-reload,implemented,crates/terminal/src/app.rs
 REQ-MARKET-001,AGENTS 3;6,"Market stream gaps stop downstream state until explicit snapshot recovery.",G02,verify-market-recovery,verified,crates/market-data/src/lib.rs
 REQ-RISK-001,AGENTS 3;25,"Risk rejects stale or unhealthy inputs before execution and fails closed.",G06,verify-risk-guardrails,verified,crates/risk-engine/src/lib.rs
 REQ-LLM-001,AGENTS 11,"LLM output is provider-neutral, bounded, trace-bound, and schema-validated before action.",G11,verify-llm-provider,verified,crates/llm-core/src/lib.rs
 REQ-GRAPH-001,AGENTS 16;17,"Graph facts retain temporal provenance and retrieval enforces embedding model compatibility.",G12,verify-graph-retrieval,verified,crates/context-graph/src/lib.rs
 REQ-AUTONOMY-001,AGENTS 9;10,"Autonomous approval is policy-bound and revalidated against unchanged critical context.",G13,verify-autonomy-policy,verified,crates/autonomy/src/lib.rs
-REQ-UI-001,AGENTS 18;19;21,"Manual order submission requires preview, warnings, explicit confirmation, and idempotency.",G09,verify-ui-order-ticket,implemented,ui/src/commands/bridge.ts
-REQ-UI-CONFIG-001,AGENTS 30;43;48,"Operational UI status refresh cadence is bounded, configuration-driven, and does not overlap in-flight diagnostic requests.",G09,verify-ui-config-poll,verified,ui/tests/workstation-contract.test.js
+REQ-TERMINAL-ORDER-001,AGENTS 18;19;21,"Manual order submission requires preview, warnings, explicit confirmation, and idempotency.",G09,verify-terminal-order,implemented,crates/terminal/src/app.rs
+REQ-TERMINAL-REFRESH-001,AGENTS 43,"Operational terminal refresh cadence is bounded and does not overlap in-flight diagnostic requests.",G09,verify-terminal-refresh,implemented,crates/terminal/src/app.rs
 REQ-ALERT-001,AGENTS 46;49,"Alert routing is bounded, HTTPS-only, credential-safe, and acknowledges in-app and external channels independently.",G14,verify-alert-router,verified,crates/alerts/src/lib.rs
 REQ-PROVIDER-URL-001,AGENTS 49,"Provider and article URLs are bounded, authority-present, HTTPS/localhost constrained, and contain no credentials.",G11,verify-provider-url-boundary,verified,crates/desktop-bridge/src/main.rs
 REQ-YAHOO-CONFIG-001,AGENTS 30;59,"Yahoo multi-symbol subscriptions are file-first, bounded to 128 entries, and use environment fallback only when CFG is absent.",G02,verify-yahoo-config,verified,crates/desktop-bridge/src/main.rs
@@ -24,32 +24,32 @@ REQ-MARK-SAFETY-CONFIG-001,AGENTS 30,"Synthetic/non-authoritative mark safety ov
 REQ-IBKR-ACCOUNT-CONFIG-001,AGENTS 30,"Non-secret IBKR account identity is typed file-first configuration while credentials remain secret inputs.",G07,verify-ibkr-account-config,verified,crates/desktop-bridge/src/main.rs
 REQ-IBKR-POLL-CONFIG-001,AGENTS 30,"IBKR conid and instrument polling identities are typed file-first positive values captured before worker creation.",G07,verify-ibkr-poll-config,verified,crates/desktop-bridge/src/main.rs
 REQ-PYTHON-NETWORK-CONFIG-001,AGENTS 30,"Python worker network access is a typed file-first boolean, fail-closed by default, and injected before launch.",G03,verify-python-network-config,verified,crates/desktop-bridge/src/main.rs
-REQ-UI-CANCEL-ALL-001,UI.md 11;120,"Orders surface provides one-motion access to cancel working orders through the existing command path with explicit confirmation.",G09,verify-ui-cancel-all,verified,ui/src/app/main.ts
-REQ-UI-CLOSE-DRAFT-001,UI.md 11;120,"Positions surface provides one-motion opposite-quantity close drafting without bypassing order preview/risk/confirmation.",G09,verify-ui-close-draft,verified,ui/src/app/main.ts
-REQ-UI-PROPOSAL-ESCAPE-001,AGENTS 30,"Provider/runtime strategy identifiers are escaped before compact proposal HTML rendering.",G09,verify-ui-proposal-escaping,verified,ui/src/app/main.ts
-REQ-UI-ORDER-A11Y-001,UI.md 11,"Dense order-list Cancel and Replace actions expose explicit side/instrument/quantity accessible names.",G09,verify-ui-order-a11y,verified,ui/src/app/main.ts
-REQ-UI-PROPOSAL-A11Y-001,UI.md 11,"Repeated strategy proposal actions expose explicit strategy-and-symbol accessible names for Draft, TWAP, and implementation-shortfall scheduling.",G09,verify-ui-proposal-a11y,verified,ui/src/app/main.ts
-REQ-UI-PROPOSAL-A11Y-NORM-001,AGENTS 50,"Repeated proposal and order actions have explicit context-bearing accessible names enforced by contract tests.",G09,verify-ui-proposal-a11y-norm,verified,AGENTS.md
-REQ-UI-PROPOSAL-PREVIEW-A11Y-001,UI.md 11,"Compact proposal-list Preview controls expose strategy-and-symbol accessible names.",G09,verify-ui-proposal-preview-a11y,verified,ui/src/app/main.ts
-REQ-UI-COMMAND-ESCAPE-001,AGENTS 49;50,"Command palette command identifiers and labels are escaped before rendering, including custom workspace entries.",G09,verify-ui-command-escape,verified,ui/src/app/main.ts
-REQ-UI-NEWS-STATE-001,PLAN G10;UI.md 9,"News feed exposes loading, provider-error-with-cache, and stale states while preserving bounded pagination and cursor continuity.",G10,verify-ui-news-state,verified,ui/src/app/main.ts
-REQ-UI-NEWS-RETRY-001,PLAN G10;UI.md 9,"News provider failures expose an actionable retry that reuses the failed request scope, symbol, and cursor.",G10,verify-ui-news-retry,verified,ui/src/app/main.ts
-REQ-UI-NEWS-CONTEXT-001,PLAN G10;AGENTS 15,"Initial news loads clear the prior feed before a symbol/timeframe/scope refresh; cursor pagination alone appends.",G10,verify-ui-news-context,verified,ui/src/app/main.ts
-REQ-UI-NEWS-RACE-001,PLAN G10,"Rapid initial news context changes queue the latest request instead of silently dropping it while a prior request is in flight.",G10,verify-ui-news-race,verified,ui/src/app/main.ts
-REQ-UI-NEWS-A11Y-001,UI.md 9;AGENTS 50,"Virtualized news Pin and Details controls expose article-specific accessible names with escaped titles.",G10,verify-ui-news-a11y,verified,ui/src/app/main.ts
-REQ-UI-NEWS-BUSY-001,AGENTS 50,"News feed exposes aria-busy during provider requests and context-specific retry labeling.",G10,verify-ui-news-busy-a11y,verified,ui/src/app/main.ts
-REQ-UI-NEWS-PROVIDER-001,PLAN G10,"News panel surfaces bounded provider health statuses alongside the feed without exposing credentials.",G10,verify-ui-news-provider-status,verified,ui/src/app/main.ts
-REQ-UI-NEWS-PROVIDER-STYLE-001,UI.md 2;5,"Provider health chips use text labels plus status glyphs and compact glass styling, never color alone.",G10,verify-ui-news-provider-style,verified,ui/src/theme/tokens.css
-REQ-UI-NEWS-TABS-A11Y-001,UI.md 9;AGENTS 50,"News view tabs expose a valid tab-to-tabpanel relationship for Relevant, All, Watchlist, and Portfolio views.",G10,verify-ui-news-tabs-a11y,verified,ui/src/app/main.ts
-REQ-UI-NEWS-TABS-KEYBOARD-001,UI.md 10;AGENTS 50,"News tabs implement roving focus and Arrow/Home/End keyboard navigation.",G10,verify-ui-news-tabs-keyboard,verified,ui/src/app/main.ts
-REQ-UI-NEWS-FILTER-PERSIST-001,AGENTS 48;PLAN G14,"Selected News view filter persists in a versioned presentation-only storage key and rejects invalid values.",G10,verify-ui-news-filter-persistence,verified,ui/src/app/main.ts
-REQ-UI-WORKSPACE-TABS-A11Y-001,UI.md 7;AGENTS 50,"Workspace tabs expose the controlled workspace region through an explicit aria-controls relationship.",G09,verify-ui-workspace-tabs-a11y,verified,ui/src/app/main.ts
-REQ-UI-WORKSPACE-PANEL-A11Y-001,UI.md 7;AGENTS 50,"Active workspace tab and workspace panel expose a stable labelled tabpanel relationship.",G09,verify-ui-workspace-panel-a11y,verified,ui/src/app/main.ts
-REQ-UI-RIGHT-DOCK-A11Y-001,UI.md 7;AGENTS 50,"Trading right-dock tabs expose an explicit tab-to-tabpanel relationship for Positions, Orders, Watchlist, and Alerts.",G09,verify-ui-right-dock-a11y,verified,ui/src/app/main.ts
-REQ-UI-RIGHT-DOCK-PERSIST-001,AGENTS 48,"Selected Trading right-dock tab persists in a versioned presentation-only key and rejects unknown values.",G09,verify-ui-right-dock-persistence,verified,ui/src/app/main.ts
-REQ-UI-WORKSPACE-TAB-NORMALIZE-001,AGENTS 19;48,"Workspace tab-order restore rewrites the validated fallback/order into the versioned storage key.",G09,verify-ui-workspace-tab-normalize,verified,ui/src/app/main.ts
-REQ-UI-CFG-NEWS-STALE-001,AGENTS 3;PLAN G10,"News stale threshold is CFG-driven, bounded to 60,000–3,600,000 ms, and generated without replacing unrelated settings.",G10,verify-ui-cfg-news-stale,verified,ui/src/app/main.ts
-REQ-UI-TAB-POSITION-001,AGENTS 50,"Dense News and workspace tablists expose bounded set-size and position metadata for assistive technology.",G09,verify-ui-tab-position,verified,ui/src/app/main.ts
+REQ-UI-CANCEL-ALL-001,UI.md 11;120,"Orders surface provides one-motion access to cancel working orders through the existing command path with explicit confirmation.",G09,verify-ui-cancel-all,planned,TERMINAL.md
+REQ-UI-CLOSE-DRAFT-001,UI.md 11;120,"Positions surface provides one-motion opposite-quantity close drafting without bypassing order preview/risk/confirmation.",G09,verify-ui-close-draft,planned,TERMINAL.md
+REQ-UI-PROPOSAL-ESCAPE-001,AGENTS 30,"Provider/runtime strategy identifiers are escaped before compact proposal HTML rendering.",G09,verify-ui-proposal-escaping,planned,TERMINAL.md
+REQ-UI-ORDER-A11Y-001,UI.md 11,"Dense order-list Cancel and Replace actions expose explicit side/instrument/quantity accessible names.",G09,verify-ui-order-a11y,planned,TERMINAL.md
+REQ-UI-PROPOSAL-A11Y-001,UI.md 11,"Repeated strategy proposal actions expose explicit strategy-and-symbol accessible names for Draft, TWAP, and implementation-shortfall scheduling.",G09,verify-ui-proposal-a11y,planned,TERMINAL.md
+REQ-UI-PROPOSAL-A11Y-NORM-001,AGENTS 50,"Repeated proposal and order actions have explicit context-bearing accessible names enforced by contract tests.",G09,verify-ui-proposal-a11y-norm,planned,TERMINAL.md
+REQ-UI-PROPOSAL-PREVIEW-A11Y-001,UI.md 11,"Compact proposal-list Preview controls expose strategy-and-symbol accessible names.",G09,verify-ui-proposal-preview-a11y,planned,TERMINAL.md
+REQ-UI-COMMAND-ESCAPE-001,AGENTS 49;50,"Command palette command identifiers and labels are escaped before rendering, including custom workspace entries.",G09,verify-ui-command-escape,planned,TERMINAL.md
+REQ-UI-NEWS-STATE-001,PLAN G10;UI.md 9,"News feed exposes loading, provider-error-with-cache, and stale states while preserving bounded pagination and cursor continuity.",G10,verify-ui-news-state,planned,TERMINAL.md
+REQ-UI-NEWS-RETRY-001,PLAN G10;UI.md 9,"News provider failures expose an actionable retry that reuses the failed request scope, symbol, and cursor.",G10,verify-ui-news-retry,planned,TERMINAL.md
+REQ-UI-NEWS-CONTEXT-001,PLAN G10;AGENTS 15,"Initial news loads clear the prior feed before a symbol/timeframe/scope refresh; cursor pagination alone appends.",G10,verify-ui-news-context,planned,TERMINAL.md
+REQ-UI-NEWS-RACE-001,PLAN G10,"Rapid initial news context changes queue the latest request instead of silently dropping it while a prior request is in flight.",G10,verify-ui-news-race,planned,TERMINAL.md
+REQ-UI-NEWS-A11Y-001,UI.md 9;AGENTS 50,"Virtualized news Pin and Details controls expose article-specific accessible names with escaped titles.",G10,verify-ui-news-a11y,planned,TERMINAL.md
+REQ-UI-NEWS-BUSY-001,AGENTS 50,"News feed exposes aria-busy during provider requests and context-specific retry labeling.",G10,verify-ui-news-busy-a11y,planned,TERMINAL.md
+REQ-UI-NEWS-PROVIDER-001,PLAN G10,"News panel surfaces bounded provider health statuses alongside the feed without exposing credentials.",G10,verify-ui-news-provider-status,planned,TERMINAL.md
+REQ-UI-NEWS-PROVIDER-STYLE-001,UI.md 2;5,"Provider health chips use text labels plus status glyphs and compact glass styling, never color alone.",G10,verify-ui-news-provider-style,planned,TERMINAL.md
+REQ-UI-NEWS-TABS-A11Y-001,UI.md 9;AGENTS 50,"News view tabs expose a valid tab-to-tabpanel relationship for Relevant, All, Watchlist, and Portfolio views.",G10,verify-ui-news-tabs-a11y,planned,TERMINAL.md
+REQ-UI-NEWS-TABS-KEYBOARD-001,UI.md 10;AGENTS 50,"News tabs implement roving focus and Arrow/Home/End keyboard navigation.",G10,verify-ui-news-tabs-keyboard,planned,TERMINAL.md
+REQ-UI-NEWS-FILTER-PERSIST-001,AGENTS 48;PLAN G14,"Selected News view filter persists in a versioned presentation-only storage key and rejects invalid values.",G10,verify-ui-news-filter-persistence,planned,TERMINAL.md
+REQ-UI-WORKSPACE-TABS-A11Y-001,UI.md 7;AGENTS 50,"Workspace tabs expose the controlled workspace region through an explicit aria-controls relationship.",G09,verify-ui-workspace-tabs-a11y,planned,TERMINAL.md
+REQ-UI-WORKSPACE-PANEL-A11Y-001,UI.md 7;AGENTS 50,"Active workspace tab and workspace panel expose a stable labelled tabpanel relationship.",G09,verify-ui-workspace-panel-a11y,planned,TERMINAL.md
+REQ-UI-RIGHT-DOCK-A11Y-001,UI.md 7;AGENTS 50,"Trading right-dock tabs expose an explicit tab-to-tabpanel relationship for Positions, Orders, Watchlist, and Alerts.",G09,verify-ui-right-dock-a11y,planned,TERMINAL.md
+REQ-UI-RIGHT-DOCK-PERSIST-001,AGENTS 48,"Selected Trading right-dock tab persists in a versioned presentation-only key and rejects unknown values.",G09,verify-ui-right-dock-persistence,planned,TERMINAL.md
+REQ-UI-WORKSPACE-TAB-NORMALIZE-001,AGENTS 19;48,"Workspace tab-order restore rewrites the validated fallback/order into the versioned storage key.",G09,verify-ui-workspace-tab-normalize,planned,TERMINAL.md
+REQ-UI-CFG-NEWS-STALE-001,AGENTS 3;PLAN G10,"News stale threshold is CFG-driven, bounded to 60,000–3,600,000 ms, and generated without replacing unrelated settings.",G10,verify-ui-cfg-news-stale,planned,TERMINAL.md
+REQ-UI-TAB-POSITION-001,AGENTS 50,"Dense News and workspace tablists expose bounded set-size and position metadata for assistive technology.",G09,verify-ui-tab-position,planned,TERMINAL.md
 ACCEPT-A001,AGENTS Appendix B,"A001 acceptance requirement",G15,verify-acceptance-a001,planned,AGENTS.md
 ACCEPT-A002,AGENTS Appendix B,"A002 acceptance requirement",G15,verify-acceptance-a002,planned,AGENTS.md
 ACCEPT-A003,AGENTS Appendix B,"A003 acceptance requirement",G15,verify-acceptance-a003,planned,AGENTS.md

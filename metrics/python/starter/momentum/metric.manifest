@@ -1,0 +1,12 @@
+metric:
+  id: "momentum.return_clamped.v1"
+  language: "python"
+  entrypoint: "metrics.python.starter.momentum:evaluate"
+  inputs: [return]
+  min_score: -1.0
+  max_score: 1.0
+  ttl_ns: 1000000000
+  period_ns: 100000000
+  deadline_ns: 10000000
+  budget_ns: 5000000
+  priority: FAST

@@ -1,19 +1,18 @@
 # Contributing to InsiderTrader
 
-InsiderTrader is a deterministic trading system with a Tauri workstation. Contributions
-must preserve the boundary that metrics and strategies propose actions while portfolio,
-risk, execution, broker, and reconciliation services remain authoritative.
+InsiderTrader is a deterministic trading system with a native Rust terminal workstation.
+Contributions must preserve the boundary that metrics and strategies propose actions
+while portfolio, risk, execution, broker, and reconciliation services remain authoritative.
 
 ## Development setup
 
-Install the pinned Rust toolchain from `rust-toolchain.toml`, Python version from
-`.python-version`, and Node/npm versions from `ui/.node-version` and `ui/package.json`.
-Then hydrate dependencies without changing lockfiles:
+Install the pinned Rust toolchain from `rust-toolchain.toml` and Python version from
+`.python-version`. Then hydrate dependencies without changing lockfiles:
 
 ```bash
 cargo test --workspace
 PYTHONPATH=python python3 -m unittest discover -s tests/python -p 'test_*.py'
-cd ui && npm ci && npm test && npm run check && npm run build
+cargo build --locked -p insider-terminal
 ```
 
 The complete required gate is:
@@ -23,8 +22,8 @@ The complete required gate is:
 ```
 
 Run it before opening a pull request. It checks formatting, Clippy, Rust and Python
-tests, schema/dependency/license/security/documentation contracts, UI tests and build,
-and the CFG/runbook requirements.
+tests, schema/dependency/license/security/documentation contracts, the native terminal
+build, and the CFG/runbook requirements.
 
 For a safe paper startup preflight using isolated temporary paths, run:
 
@@ -35,10 +34,10 @@ make paper-check
 ## Configuration and secrets
 
 Runtime behavior that may change operationally belongs in a bounded `.cfg` file. Start
-with `config/example.cfg` and use the Configuration panel or an atomic engine reload;
-do not hard-code deployment values in Rust or TypeScript. Credentials are never stored
-in `.cfg`, UI local storage, fixtures, or commits. Use the deployment secret boundary
-and reference secrets by name.
+with `config/example.cfg` and use `CONFIG LOAD <path>` or another authenticated atomic
+engine reload; do not hard-code deployment values. Credentials are never stored in
+`.cfg`, terminal preferences or history, fixtures, or commits. Use the deployment
+secret boundary and reference secrets by name.
 
 Provider failures must degrade without blocking charts, deterministic strategies, risk,
 or manual order entry. New provider integrations require deterministic offline fixtures.
@@ -53,10 +52,10 @@ Every change must include:
    limitation.
 3. Schema changes with regenerated artifacts and compatibility tests.
 4. Journal/event changes with replay and restart coverage.
-5. UI changes with accessibility labels, keyboard behavior, persistence boundaries, and
-   a workstation contract test where applicable.
+5. Terminal changes with keyboard behavior, bounded rendering/input, persistence
+   boundaries, and a workstation contract test where applicable.
 
-Never bypass risk or reconciliation in a UI action, LLM tool, strategy, or test helper.
+Never bypass risk or reconciliation in a terminal action, LLM tool, strategy, or test helper.
 Do not add live provider calls to deterministic tests. Do not mark an acceptance gate
 complete without the packaged evidence required by `PLAN.md` and `AGENTS.md`.
 

@@ -217,6 +217,11 @@ impl Catalog {
         self.instruments.is_empty()
     }
 
+    /// Iterates over every canonical definition for runtime registration.
+    pub fn instruments(&self) -> impl Iterator<Item = &Instrument> {
+        self.instruments.values()
+    }
+
     /// Returns whether an instrument is contract-valid and tradable at a
     /// calendar coordinate.
     #[must_use]

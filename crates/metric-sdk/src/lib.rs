@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use insider_common_types::{InstrumentId, MonoTime};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 /// Metric evaluation failure.
@@ -588,6 +588,695 @@ impl Metric for BookImbalanceMetric {
     }
 }
 
+const MAX_STARTER_WINDOW: usize = 4_096;
+const DEFAULT_MAX_STARTER_INSTRUMENTS: usize = 4_096;
+const MAX_STARTER_STATE_SAMPLES: usize = 262_144;
+
+fn checkpoint_field<const SIZE: usize>(
+    bytes: &[u8],
+    cursor: &mut usize,
+) -> Result<[u8; SIZE], MetricError> {
+    let end = cursor
+        .checked_add(SIZE)
+        .ok_or(MetricError::InvalidOutput("checkpoint length"))?;
+    let field = bytes
+        .get(*cursor..end)
+        .ok_or(MetricError::InvalidOutput("checkpoint length"))?;
+    *cursor = end;
+    field
+        .try_into()
+        .map_err(|_| MetricError::InvalidOutput("checkpoint field"))
+}
+
+/// Bounded statistical value returned by a batch reference calculation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MetricEstimate {
+    /// Cross-asset normalized metric value.
+    pub score: f64,
+    /// Warm-up confidence in `[0, 1]`.
+    pub confidence: f64,
+    /// Non-negative dispersion estimate in the same normalized units.
+    pub uncertainty: f64,
+}
+
+/// One validated OHLC observation for batch ATR calculations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OhlcSample {
+    /// Highest traded price in the interval.
+    pub high: f64,
+    /// Lowest traded price in the interval.
+    pub low: f64,
+    /// Closing price in the interval.
+    pub close: f64,
+}
+
+fn validate_window(window: usize) -> Result<(), MetricError> {
+    if window == 0 || window > MAX_STARTER_WINDOW {
+        return Err(MetricError::InvalidOutput("rolling window"));
+    }
+    Ok(())
+}
+
+fn validate_ohlc(sample: OhlcSample) -> Result<(), MetricError> {
+    if !sample.high.is_finite()
+        || !sample.low.is_finite()
+        || !sample.close.is_finite()
+        || sample.low <= 0.0
+        || sample.low > sample.close
+        || sample.close > sample.high
+    {
+        return Err(MetricError::InvalidOutput("ohlc sample"));
+    }
+    Ok(())
+}
+
+fn standard_deviation(values: &[f64]) -> Result<f64, MetricError> {
+    if values.is_empty() {
+        return Ok(0.0);
+    }
+    let count =
+        u32::try_from(values.len()).map_err(|_| MetricError::InvalidOutput("sample count"))?;
+    let count = f64::from(count);
+    let mean = values.iter().sum::<f64>() / count;
+    let variance = values
+        .iter()
+        .map(|value| {
+            let difference = value - mean;
+            difference * difference
+        })
+        .sum::<f64>()
+        / count;
+    if !variance.is_finite() || variance < 0.0 {
+        return Err(MetricError::InvalidOutput("sample dispersion"));
+    }
+    Ok(variance.sqrt())
+}
+
+fn exponential_average(values: &[f64], window: usize) -> Result<f64, MetricError> {
+    let Some((&first, remaining)) = values.split_first() else {
+        return Err(MetricError::MissingInput(String::from("close_price")));
+    };
+    let window = u32::try_from(window).map_err(|_| MetricError::InvalidOutput("ema window"))?;
+    let alpha = 2.0 / (f64::from(window) + 1.0);
+    let average = remaining
+        .iter()
+        .fold(first, |average, value| average + alpha * (value - average));
+    if !average.is_finite() || average <= 0.0 {
+        return Err(MetricError::InvalidOutput("ema value"));
+    }
+    Ok(average)
+}
+
+/// Computes the batch reference value for a normalized fast/slow EMA trend.
+///
+/// The calculation consumes at most the most recent `slow_window` prices, so
+/// incremental and replay implementations share the same bounded state.
+///
+/// # Errors
+/// Returns [`MetricError`] for an empty/non-finite price series or invalid
+/// window relationship.
+pub fn normalized_ema_trend_batch(
+    closes: &[f64],
+    fast_window: usize,
+    slow_window: usize,
+) -> Result<MetricEstimate, MetricError> {
+    validate_window(fast_window)?;
+    validate_window(slow_window)?;
+    if fast_window >= slow_window {
+        return Err(MetricError::InvalidOutput("ema window relationship"));
+    }
+    if closes.is_empty() {
+        return Err(MetricError::MissingInput(String::from("close_price")));
+    }
+    if closes
+        .iter()
+        .any(|close| !close.is_finite() || *close <= 0.0)
+    {
+        return Err(MetricError::InvalidOutput("close price"));
+    }
+    let retained = &closes[closes.len().saturating_sub(slow_window)..];
+    let fast = exponential_average(retained, fast_window)?;
+    let slow = exponential_average(retained, slow_window)?;
+    let raw_score = (fast - slow) / slow;
+    if !raw_score.is_finite() {
+        return Err(MetricError::InvalidOutput("ema trend"));
+    }
+    let returns = retained
+        .windows(2)
+        .map(|pair| pair[1] / pair[0] - 1.0)
+        .collect::<Vec<_>>();
+    if returns.iter().any(|value| !value.is_finite()) {
+        return Err(MetricError::InvalidOutput("ema returns"));
+    }
+    let observations =
+        u32::try_from(retained.len()).map_err(|_| MetricError::InvalidOutput("sample count"))?;
+    let slow_window =
+        u32::try_from(slow_window).map_err(|_| MetricError::InvalidOutput("ema window"))?;
+    Ok(MetricEstimate {
+        score: raw_score.clamp(-1.0, 1.0),
+        confidence: f64::from(observations) / f64::from(slow_window),
+        uncertainty: standard_deviation(&returns)?,
+    })
+}
+
+/// Computes the batch reference value for normalized average true range.
+///
+/// True range is divided by each bar's close, making the result comparable
+/// across assets with different price scales. At most `window + 1` trailing
+/// bars affect the value; the extra bar supplies the prior close.
+///
+/// # Errors
+/// Returns [`MetricError`] for invalid OHLC data, an empty slice, or an
+/// unbounded window.
+pub fn normalized_average_true_range_batch(
+    bars: &[OhlcSample],
+    window: usize,
+) -> Result<MetricEstimate, MetricError> {
+    validate_window(window)?;
+    if bars.is_empty() {
+        return Err(MetricError::MissingInput(String::from("ohlc")));
+    }
+    for sample in bars {
+        validate_ohlc(*sample)?;
+    }
+    let retained = &bars[bars.len().saturating_sub(window.saturating_add(1))..];
+    let start = retained.len().saturating_sub(window);
+    let mut ranges = Vec::with_capacity(retained.len().saturating_sub(start));
+    for index in start..retained.len() {
+        let bar = retained[index];
+        let previous_close = if index == 0 {
+            bar.close
+        } else {
+            retained[index - 1].close
+        };
+        let true_range = (bar.high - bar.low)
+            .max((bar.high - previous_close).abs())
+            .max((bar.low - previous_close).abs());
+        let normalized = true_range / bar.close;
+        if !normalized.is_finite() || normalized < 0.0 {
+            return Err(MetricError::InvalidOutput("normalized true range"));
+        }
+        ranges.push(normalized);
+    }
+    let count =
+        u32::try_from(ranges.len()).map_err(|_| MetricError::InvalidOutput("sample count"))?;
+    let window = u32::try_from(window).map_err(|_| MetricError::InvalidOutput("atr window"))?;
+    let score = ranges.iter().sum::<f64>() / f64::from(count);
+    if !score.is_finite() {
+        return Err(MetricError::InvalidOutput("normalized atr"));
+    }
+    Ok(MetricEstimate {
+        score,
+        confidence: f64::from(count) / f64::from(window),
+        uncertainty: standard_deviation(&ranges)?,
+    })
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn bar_index(context: &MetricContext) -> Result<i64, MetricError> {
+    let value = context.feature("bar_index")?;
+    if value.fract() != 0.0 || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return Err(MetricError::InvalidOutput("bar index"));
+    }
+    // The authoritative engine emits an i32 bar ordinal as f64. Range and
+    // integrality checks above make the narrowing conversion lossless.
+    Ok(i64::from(value as i32))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IndexedClose {
+    bar_index: i64,
+    close: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EmaInstrumentState {
+    closes: VecDeque<IndexedClose>,
+}
+
+/// Bounded per-instrument normalized fast/slow EMA trend metric.
+///
+/// Re-evaluating the latest bar replaces it, which gives live corrections and
+/// point-in-time replay the same behavior instead of double-counting a bar.
+pub struct NormalizedEmaTrend {
+    descriptor: MetricDescriptor,
+    fast_window: usize,
+    slow_window: usize,
+    max_instruments: usize,
+    states: Mutex<BTreeMap<InstrumentId, EmaInstrumentState>>,
+}
+
+impl NormalizedEmaTrend {
+    /// Creates a normalized EMA trend metric with a bounded default universe.
+    ///
+    /// # Errors
+    /// Returns [`MetricError`] when identity, windows, or TTL are invalid.
+    pub fn new(
+        metric_id: String,
+        fast_window: usize,
+        slow_window: usize,
+        ttl_ns: u64,
+    ) -> Result<Self, MetricError> {
+        Self::new_with_instrument_capacity(
+            metric_id,
+            fast_window,
+            slow_window,
+            ttl_ns,
+            DEFAULT_MAX_STARTER_INSTRUMENTS,
+        )
+    }
+
+    /// Creates the metric with an explicit hard instrument-state capacity.
+    ///
+    /// # Errors
+    /// Returns [`MetricError`] when any bound is zero or invalid.
+    pub fn new_with_instrument_capacity(
+        metric_id: String,
+        fast_window: usize,
+        slow_window: usize,
+        ttl_ns: u64,
+        max_instruments: usize,
+    ) -> Result<Self, MetricError> {
+        validate_window(fast_window)?;
+        validate_window(slow_window)?;
+        if metric_id.trim().is_empty()
+            || fast_window >= slow_window
+            || ttl_ns == 0
+            || max_instruments == 0
+            || slow_window
+                .checked_mul(max_instruments)
+                .is_none_or(|samples| samples > MAX_STARTER_STATE_SAMPLES)
+        {
+            return Err(MetricError::InvalidOutput("ema trend configuration"));
+        }
+        Ok(Self {
+            descriptor: MetricDescriptor {
+                metric_id,
+                inputs: vec![String::from("bar_index"), String::from("close_price")],
+                min_score: Some(-1.0),
+                max_score: Some(1.0),
+                ttl_ns,
+            },
+            fast_window,
+            slow_window,
+            max_instruments,
+            states: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Returns retained observations for one canonical instrument.
+    #[must_use]
+    pub fn observations(&self, instrument_id: InstrumentId) -> usize {
+        self.states.lock().map_or(0, |states| {
+            states
+                .get(&instrument_id)
+                .map_or(0, |state| state.closes.len())
+        })
+    }
+}
+
+impl Metric for NormalizedEmaTrend {
+    fn descriptor(&self) -> &MetricDescriptor {
+        &self.descriptor
+    }
+
+    fn evaluate(&self, context: &MetricContext) -> Result<MetricOutput, MetricError> {
+        let instrument_id = context
+            .instrument_id
+            .ok_or_else(|| MetricError::MissingInput(String::from("instrument_id")))?;
+        let index = bar_index(context)?;
+        let close = context.feature("close_price")?;
+        if close <= 0.0 {
+            return Err(MetricError::InvalidOutput("close price"));
+        }
+        let mut states = self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))?;
+        if !states.contains_key(&instrument_id) && states.len() >= self.max_instruments {
+            return Err(MetricError::InvalidOutput("instrument capacity"));
+        }
+        let state = states.entry(instrument_id).or_default();
+        match state.closes.back_mut() {
+            Some(last) if index < last.bar_index => {
+                return Err(MetricError::InvalidOutput("out-of-order bar"));
+            }
+            Some(last) if index == last.bar_index => last.close = close,
+            _ => state.closes.push_back(IndexedClose {
+                bar_index: index,
+                close,
+            }),
+        }
+        while state.closes.len() > self.slow_window {
+            state.closes.pop_front();
+        }
+        let closes = state
+            .closes
+            .iter()
+            .map(|sample| sample.close)
+            .collect::<Vec<_>>();
+        let estimate = normalized_ema_trend_batch(&closes, self.fast_window, self.slow_window)?;
+        Ok(MetricOutput {
+            metric_id: self.descriptor.metric_id.clone(),
+            instrument_id,
+            generated_mono: context.now,
+            ttl_ns: self.descriptor.ttl_ns,
+            score: estimate.score,
+            confidence: estimate.confidence,
+            uncertainty: estimate.uncertainty,
+        })
+    }
+
+    fn checkpoint(&self) -> Result<Option<Vec<u8>>, MetricError> {
+        let states = self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))?;
+        let fast_window = u32::try_from(self.fast_window)
+            .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let slow_window = u32::try_from(self.slow_window)
+            .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let instrument_count = u32::try_from(states.len())
+            .map_err(|_| MetricError::InvalidOutput("checkpoint instruments"))?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"EMAT_V1\0");
+        bytes.extend_from_slice(&fast_window.to_le_bytes());
+        bytes.extend_from_slice(&slow_window.to_le_bytes());
+        bytes.extend_from_slice(&instrument_count.to_le_bytes());
+        for (instrument_id, state) in states.iter() {
+            bytes.extend_from_slice(&instrument_id.get().to_le_bytes());
+            let count = u32::try_from(state.closes.len())
+                .map_err(|_| MetricError::InvalidOutput("checkpoint samples"))?;
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for sample in &state.closes {
+                bytes.extend_from_slice(&sample.bar_index.to_le_bytes());
+                bytes.extend_from_slice(&sample.close.to_bits().to_le_bytes());
+            }
+        }
+        Ok(Some(bytes))
+    }
+
+    fn restore_checkpoint(&self, bytes: &[u8]) -> Result<(), MetricError> {
+        if !bytes.starts_with(b"EMAT_V1\0") {
+            return Err(MetricError::InvalidOutput("checkpoint schema"));
+        }
+        let mut cursor = 8;
+        let fast_window =
+            usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let slow_window =
+            usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let instrument_count =
+            usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint instruments"))?;
+        if fast_window != self.fast_window
+            || slow_window != self.slow_window
+            || instrument_count > self.max_instruments
+        {
+            return Err(MetricError::InvalidOutput("checkpoint configuration"));
+        }
+        let mut restored = BTreeMap::new();
+        let mut total_samples = 0_usize;
+        for _ in 0..instrument_count {
+            let raw_id = u128::from_le_bytes(checkpoint_field(bytes, &mut cursor)?);
+            let instrument_id = InstrumentId::new(raw_id)
+                .map_err(|_| MetricError::InvalidOutput("checkpoint instrument"))?;
+            let count = usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint samples"))?;
+            total_samples = total_samples
+                .checked_add(count)
+                .ok_or(MetricError::InvalidOutput("checkpoint samples"))?;
+            if count > self.slow_window || total_samples > MAX_STARTER_STATE_SAMPLES {
+                return Err(MetricError::InvalidOutput("checkpoint samples"));
+            }
+            let mut closes = VecDeque::with_capacity(count);
+            let mut previous_index = None;
+            for _ in 0..count {
+                let sample = IndexedClose {
+                    bar_index: i64::from_le_bytes(checkpoint_field(bytes, &mut cursor)?),
+                    close: f64::from_bits(u64::from_le_bytes(checkpoint_field(
+                        bytes,
+                        &mut cursor,
+                    )?)),
+                };
+                if !sample.close.is_finite()
+                    || sample.close <= 0.0
+                    || previous_index.is_some_and(|index| sample.bar_index <= index)
+                {
+                    return Err(MetricError::InvalidOutput("checkpoint sample"));
+                }
+                previous_index = Some(sample.bar_index);
+                closes.push_back(sample);
+            }
+            if restored
+                .insert(instrument_id, EmaInstrumentState { closes })
+                .is_some()
+            {
+                return Err(MetricError::InvalidOutput("checkpoint instrument"));
+            }
+        }
+        if cursor != bytes.len() {
+            return Err(MetricError::InvalidOutput("checkpoint trailing bytes"));
+        }
+        *self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))? = restored;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IndexedOhlc {
+    bar_index: i64,
+    value: OhlcSample,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AtrInstrumentState {
+    bars: VecDeque<IndexedOhlc>,
+}
+
+/// Bounded per-instrument normalized average-true-range metric.
+pub struct NormalizedAverageTrueRange {
+    descriptor: MetricDescriptor,
+    window: usize,
+    max_instruments: usize,
+    states: Mutex<BTreeMap<InstrumentId, AtrInstrumentState>>,
+}
+
+impl NormalizedAverageTrueRange {
+    /// Creates a normalized ATR metric with a bounded default universe.
+    ///
+    /// # Errors
+    /// Returns [`MetricError`] when identity, window, or TTL are invalid.
+    pub fn new(metric_id: String, window: usize, ttl_ns: u64) -> Result<Self, MetricError> {
+        Self::new_with_instrument_capacity(
+            metric_id,
+            window,
+            ttl_ns,
+            DEFAULT_MAX_STARTER_INSTRUMENTS,
+        )
+    }
+
+    /// Creates the metric with an explicit hard instrument-state capacity.
+    ///
+    /// # Errors
+    /// Returns [`MetricError`] when any bound is zero or invalid.
+    pub fn new_with_instrument_capacity(
+        metric_id: String,
+        window: usize,
+        ttl_ns: u64,
+        max_instruments: usize,
+    ) -> Result<Self, MetricError> {
+        validate_window(window)?;
+        if metric_id.trim().is_empty()
+            || ttl_ns == 0
+            || max_instruments == 0
+            || window
+                .saturating_add(1)
+                .checked_mul(max_instruments)
+                .is_none_or(|samples| samples > MAX_STARTER_STATE_SAMPLES)
+        {
+            return Err(MetricError::InvalidOutput("atr configuration"));
+        }
+        Ok(Self {
+            descriptor: MetricDescriptor {
+                metric_id,
+                inputs: vec![
+                    String::from("bar_index"),
+                    String::from("high_price"),
+                    String::from("low_price"),
+                    String::from("close_price"),
+                ],
+                min_score: Some(0.0),
+                max_score: None,
+                ttl_ns,
+            },
+            window,
+            max_instruments,
+            states: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Returns retained observations for one canonical instrument.
+    #[must_use]
+    pub fn observations(&self, instrument_id: InstrumentId) -> usize {
+        self.states.lock().map_or(0, |states| {
+            states
+                .get(&instrument_id)
+                .map_or(0, |state| state.bars.len())
+        })
+    }
+}
+
+impl Metric for NormalizedAverageTrueRange {
+    fn descriptor(&self) -> &MetricDescriptor {
+        &self.descriptor
+    }
+
+    fn evaluate(&self, context: &MetricContext) -> Result<MetricOutput, MetricError> {
+        let instrument_id = context
+            .instrument_id
+            .ok_or_else(|| MetricError::MissingInput(String::from("instrument_id")))?;
+        let index = bar_index(context)?;
+        let value = OhlcSample {
+            high: context.feature("high_price")?,
+            low: context.feature("low_price")?,
+            close: context.feature("close_price")?,
+        };
+        validate_ohlc(value)?;
+        let mut states = self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))?;
+        if !states.contains_key(&instrument_id) && states.len() >= self.max_instruments {
+            return Err(MetricError::InvalidOutput("instrument capacity"));
+        }
+        let state = states.entry(instrument_id).or_default();
+        match state.bars.back_mut() {
+            Some(last) if index < last.bar_index => {
+                return Err(MetricError::InvalidOutput("out-of-order bar"));
+            }
+            Some(last) if index == last.bar_index => last.value = value,
+            _ => state.bars.push_back(IndexedOhlc {
+                bar_index: index,
+                value,
+            }),
+        }
+        while state.bars.len() > self.window.saturating_add(1) {
+            state.bars.pop_front();
+        }
+        let bars = state
+            .bars
+            .iter()
+            .map(|sample| sample.value)
+            .collect::<Vec<_>>();
+        let estimate = normalized_average_true_range_batch(&bars, self.window)?;
+        Ok(MetricOutput {
+            metric_id: self.descriptor.metric_id.clone(),
+            instrument_id,
+            generated_mono: context.now,
+            ttl_ns: self.descriptor.ttl_ns,
+            score: estimate.score,
+            confidence: estimate.confidence,
+            uncertainty: estimate.uncertainty,
+        })
+    }
+
+    fn checkpoint(&self) -> Result<Option<Vec<u8>>, MetricError> {
+        let states = self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))?;
+        let window = u32::try_from(self.window)
+            .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let instrument_count = u32::try_from(states.len())
+            .map_err(|_| MetricError::InvalidOutput("checkpoint instruments"))?;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"NATR_V1\0");
+        bytes.extend_from_slice(&window.to_le_bytes());
+        bytes.extend_from_slice(&instrument_count.to_le_bytes());
+        for (instrument_id, state) in states.iter() {
+            bytes.extend_from_slice(&instrument_id.get().to_le_bytes());
+            let count = u32::try_from(state.bars.len())
+                .map_err(|_| MetricError::InvalidOutput("checkpoint samples"))?;
+            bytes.extend_from_slice(&count.to_le_bytes());
+            for sample in &state.bars {
+                bytes.extend_from_slice(&sample.bar_index.to_le_bytes());
+                bytes.extend_from_slice(&sample.value.high.to_bits().to_le_bytes());
+                bytes.extend_from_slice(&sample.value.low.to_bits().to_le_bytes());
+                bytes.extend_from_slice(&sample.value.close.to_bits().to_le_bytes());
+            }
+        }
+        Ok(Some(bytes))
+    }
+
+    fn restore_checkpoint(&self, bytes: &[u8]) -> Result<(), MetricError> {
+        if !bytes.starts_with(b"NATR_V1\0") {
+            return Err(MetricError::InvalidOutput("checkpoint schema"));
+        }
+        let mut cursor = 8;
+        let window = usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+            .map_err(|_| MetricError::InvalidOutput("checkpoint window"))?;
+        let instrument_count =
+            usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint instruments"))?;
+        if window != self.window || instrument_count > self.max_instruments {
+            return Err(MetricError::InvalidOutput("checkpoint configuration"));
+        }
+        let mut restored = BTreeMap::new();
+        let mut total_samples = 0_usize;
+        for _ in 0..instrument_count {
+            let raw_id = u128::from_le_bytes(checkpoint_field(bytes, &mut cursor)?);
+            let instrument_id = InstrumentId::new(raw_id)
+                .map_err(|_| MetricError::InvalidOutput("checkpoint instrument"))?;
+            let count = usize::try_from(u32::from_le_bytes(checkpoint_field(bytes, &mut cursor)?))
+                .map_err(|_| MetricError::InvalidOutput("checkpoint samples"))?;
+            total_samples = total_samples
+                .checked_add(count)
+                .ok_or(MetricError::InvalidOutput("checkpoint samples"))?;
+            if count > self.window.saturating_add(1) || total_samples > MAX_STARTER_STATE_SAMPLES {
+                return Err(MetricError::InvalidOutput("checkpoint samples"));
+            }
+            let mut bars = VecDeque::with_capacity(count);
+            let mut previous_index = None;
+            for _ in 0..count {
+                let bar_index = i64::from_le_bytes(checkpoint_field(bytes, &mut cursor)?);
+                let value = OhlcSample {
+                    high: f64::from_bits(u64::from_le_bytes(checkpoint_field(bytes, &mut cursor)?)),
+                    low: f64::from_bits(u64::from_le_bytes(checkpoint_field(bytes, &mut cursor)?)),
+                    close: f64::from_bits(u64::from_le_bytes(checkpoint_field(
+                        bytes,
+                        &mut cursor,
+                    )?)),
+                };
+                validate_ohlc(value)?;
+                if previous_index.is_some_and(|index| bar_index <= index) {
+                    return Err(MetricError::InvalidOutput("checkpoint sample"));
+                }
+                previous_index = Some(bar_index);
+                bars.push_back(IndexedOhlc { bar_index, value });
+            }
+            if restored
+                .insert(instrument_id, AtrInstrumentState { bars })
+                .is_some()
+            {
+                return Err(MetricError::InvalidOutput("checkpoint instrument"));
+            }
+        }
+        if cursor != bytes.len() {
+            return Err(MetricError::InvalidOutput("checkpoint trailing bytes"));
+        }
+        *self
+            .states
+            .lock()
+            .map_err(|_| MetricError::InvalidOutput("state lock"))? = restored;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use insider_common_types::{InstrumentId, MonoTime};
@@ -597,7 +1286,8 @@ mod tests {
 
     use super::{
         BookImbalanceMetric, EwmaVolatility, Metric, MetricContext, MetricDescriptor, MetricOutput,
-        SimpleMovingAverage, SpreadMetric,
+        NormalizedAverageTrueRange, NormalizedEmaTrend, OhlcSample, SimpleMovingAverage,
+        SpreadMetric, normalized_average_true_range_batch, normalized_ema_trend_batch,
     };
 
     #[test]
@@ -709,5 +1399,241 @@ mod tests {
         };
         assert!((0.0..1.0).contains(&spread_output.score));
         assert!((-1.0..=1.0).contains(&imbalance_output.score));
+    }
+
+    #[test]
+    fn normalized_ema_incremental_matches_batch_and_replaces_latest_correction() {
+        let Some(instrument) = InstrumentId::new(11).ok() else {
+            return;
+        };
+        let Ok(metric) = NormalizedEmaTrend::new(String::from("trend.v1"), 2, 4, 100) else {
+            return;
+        };
+        let mut closes = vec![100.0, 101.0, 102.0, 103.0];
+        let mut output = None;
+        for (offset, close) in closes.iter().copied().enumerate() {
+            let Ok(offset) = u32::try_from(offset) else {
+                return;
+            };
+            let context = MetricContext {
+                instrument_id: Some(instrument),
+                features: BTreeMap::from([
+                    (String::from("bar_index"), f64::from(offset + 1)),
+                    (String::from("close_price"), close),
+                ]),
+                now: MonoTime::from_nanos(u64::from(offset) + 1),
+            };
+            output = metric.evaluate(&context).ok();
+        }
+        let Ok(batch) = normalized_ema_trend_batch(&closes, 2, 4) else {
+            return;
+        };
+        assert_eq!(output.as_ref().map(|value| value.score), Some(batch.score));
+        assert_eq!(
+            output.as_ref().map(|value| value.confidence),
+            Some(batch.confidence)
+        );
+        let corrected = MetricContext {
+            instrument_id: Some(instrument),
+            features: BTreeMap::from([
+                (String::from("bar_index"), 4.0),
+                (String::from("close_price"), 104.0),
+            ]),
+            now: MonoTime::from_nanos(5),
+        };
+        let Ok(corrected_output) = metric.evaluate(&corrected) else {
+            return;
+        };
+        closes[3] = 104.0;
+        let Ok(corrected_batch) = normalized_ema_trend_batch(&closes, 2, 4) else {
+            return;
+        };
+        assert_eq!(
+            corrected_output.score.to_bits(),
+            corrected_batch.score.to_bits()
+        );
+        assert_eq!(metric.observations(instrument), 4);
+
+        let out_of_order = MetricContext {
+            instrument_id: Some(instrument),
+            features: BTreeMap::from([
+                (String::from("bar_index"), 3.0),
+                (String::from("close_price"), 103.0),
+            ]),
+            now: MonoTime::from_nanos(6),
+        };
+        assert_eq!(
+            metric.evaluate(&out_of_order),
+            Err(super::MetricError::InvalidOutput("out-of-order bar"))
+        );
+    }
+
+    #[test]
+    fn normalized_atr_incremental_matches_batch_and_is_instrument_isolated() {
+        let Some(first_instrument) = InstrumentId::new(21).ok() else {
+            return;
+        };
+        let Some(second_instrument) = InstrumentId::new(22).ok() else {
+            return;
+        };
+        let Ok(metric) = NormalizedAverageTrueRange::new(String::from("atr.v1"), 3, 100) else {
+            return;
+        };
+        let bars = [
+            OhlcSample {
+                high: 101.0,
+                low: 99.0,
+                close: 100.0,
+            },
+            OhlcSample {
+                high: 104.0,
+                low: 100.0,
+                close: 103.0,
+            },
+            OhlcSample {
+                high: 106.0,
+                low: 102.0,
+                close: 105.0,
+            },
+        ];
+        let mut output = None;
+        for (offset, bar) in bars.iter().copied().enumerate() {
+            let Ok(offset) = u32::try_from(offset) else {
+                return;
+            };
+            output = metric
+                .evaluate(&MetricContext {
+                    instrument_id: Some(first_instrument),
+                    features: BTreeMap::from([
+                        (String::from("bar_index"), f64::from(offset + 1)),
+                        (String::from("high_price"), bar.high),
+                        (String::from("low_price"), bar.low),
+                        (String::from("close_price"), bar.close),
+                    ]),
+                    now: MonoTime::from_nanos(u64::from(offset) + 1),
+                })
+                .ok();
+        }
+        let Ok(batch) = normalized_average_true_range_batch(&bars, 3) else {
+            return;
+        };
+        assert_eq!(output.as_ref().map(|value| value.score), Some(batch.score));
+        assert_eq!(metric.observations(first_instrument), 3);
+        assert_eq!(metric.observations(second_instrument), 0);
+        let second = MetricContext {
+            instrument_id: Some(second_instrument),
+            features: BTreeMap::from([
+                (String::from("bar_index"), 1.0),
+                (String::from("high_price"), 10.1),
+                (String::from("low_price"), 9.9),
+                (String::from("close_price"), 10.0),
+            ]),
+            now: MonoTime::from_nanos(4),
+        };
+        assert!(metric.evaluate(&second).is_ok());
+        assert_eq!(metric.observations(first_instrument), 3);
+        assert_eq!(metric.observations(second_instrument), 1);
+    }
+
+    #[test]
+    fn starter_metric_state_capacity_and_freshness_boundary_fail_closed() {
+        let Some(first) = InstrumentId::new(31).ok() else {
+            return;
+        };
+        let Some(second) = InstrumentId::new(32).ok() else {
+            return;
+        };
+        let Ok(metric) =
+            NormalizedEmaTrend::new_with_instrument_capacity(String::from("trend.v1"), 2, 3, 10, 1)
+        else {
+            return;
+        };
+        let context = |instrument_id, index| MetricContext {
+            instrument_id: Some(instrument_id),
+            features: BTreeMap::from([
+                (String::from("bar_index"), index),
+                (String::from("close_price"), 100.0),
+            ]),
+            now: MonoTime::from_nanos(10),
+        };
+        let Ok(output) = metric.evaluate(&context(first, 1.0)) else {
+            return;
+        };
+        assert!(output.is_fresh(MonoTime::from_nanos(20)));
+        assert!(!output.is_fresh(MonoTime::from_nanos(21)));
+        assert_eq!(
+            metric.evaluate(&context(second, 1.0)),
+            Err(super::MetricError::InvalidOutput("instrument capacity"))
+        );
+    }
+
+    #[test]
+    fn starter_metric_checkpoints_restore_identical_subsequent_outputs() {
+        let Some(instrument) = InstrumentId::new(41).ok() else {
+            return;
+        };
+        let ema_context = |index: u32, close: f64, now: u64| MetricContext {
+            instrument_id: Some(instrument),
+            features: BTreeMap::from([
+                (String::from("bar_index"), f64::from(index)),
+                (String::from("close_price"), close),
+            ]),
+            now: MonoTime::from_nanos(now),
+        };
+        let Ok(live_ema) = NormalizedEmaTrend::new(String::from("trend.v1"), 2, 4, 100) else {
+            return;
+        };
+        assert!(live_ema.evaluate(&ema_context(1, 100.0, 1)).is_ok());
+        assert!(live_ema.evaluate(&ema_context(2, 101.0, 2)).is_ok());
+        let Some(ema_checkpoint) = live_ema.checkpoint().ok().flatten() else {
+            return;
+        };
+        let Ok(replay_ema) = NormalizedEmaTrend::new(String::from("trend.v1"), 2, 4, 100) else {
+            return;
+        };
+        assert!(replay_ema.restore_checkpoint(&ema_checkpoint).is_ok());
+        assert_eq!(
+            live_ema.evaluate(&ema_context(3, 103.0, 3)),
+            replay_ema.evaluate(&ema_context(3, 103.0, 3))
+        );
+        let mut malformed = ema_checkpoint;
+        malformed.push(0);
+        assert!(replay_ema.restore_checkpoint(&malformed).is_err());
+        assert_eq!(replay_ema.observations(instrument), 3);
+
+        let atr_context = |index: u32, high: f64, low: f64, close: f64, now: u64| MetricContext {
+            instrument_id: Some(instrument),
+            features: BTreeMap::from([
+                (String::from("bar_index"), f64::from(index)),
+                (String::from("high_price"), high),
+                (String::from("low_price"), low),
+                (String::from("close_price"), close),
+            ]),
+            now: MonoTime::from_nanos(now),
+        };
+        let Ok(live_atr) = NormalizedAverageTrueRange::new(String::from("atr.v1"), 3, 100) else {
+            return;
+        };
+        assert!(
+            live_atr
+                .evaluate(&atr_context(1, 101.0, 99.0, 100.0, 1))
+                .is_ok()
+        );
+        assert!(
+            live_atr
+                .evaluate(&atr_context(2, 104.0, 100.0, 103.0, 2))
+                .is_ok()
+        );
+        let Some(atr_checkpoint) = live_atr.checkpoint().ok().flatten() else {
+            return;
+        };
+        let Ok(replay_atr) = NormalizedAverageTrueRange::new(String::from("atr.v1"), 3, 100) else {
+            return;
+        };
+        assert!(replay_atr.restore_checkpoint(&atr_checkpoint).is_ok());
+        assert_eq!(
+            live_atr.evaluate(&atr_context(3, 106.0, 102.0, 105.0, 3)),
+            replay_atr.evaluate(&atr_context(3, 106.0, 102.0, 105.0, 3))
+        );
     }
 }

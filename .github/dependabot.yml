@@ -9,15 +9,6 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
-  - package-ecosystem: npm
-    directory: "/ui"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      ui-dependencies:
-        patterns:
-          - "*"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

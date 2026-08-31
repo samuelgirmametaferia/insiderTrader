@@ -1,0 +1,25 @@
+[package]
+name = "insider-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crossterm = "0.28"
+ratatui = "0.29"
+insider-autonomy = { path = "../autonomy" }
+insider-broker-api = { path = "../broker-api" }
+insider-common-types = { path = "../common-types" }
+insider-cfg-core = { path = "../cfg-core" }
+insider-engine = { path = "../engine" }
+insider-ipc = { path = "../ipc" }
+insider-llm-core = { path = "../llm-core" }
+insider-metric-host = { path = "../metric-host" }
+insider-risk-engine = { path = "../risk-engine" }
+insider-strategy-host = { path = "../strategy-host" }
+sha2 = "0.10"
+unicode-width = "0.2"

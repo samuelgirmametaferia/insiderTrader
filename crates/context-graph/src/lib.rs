@@ -394,7 +394,7 @@ pub struct RetrievalQuery {
     pub max_depth: usize,
 }
 
-/// Explainable hybrid result returned to UI/LLM callers.
+/// Explainable hybrid result returned to terminal/LLM callers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetrievalHit {
     /// Stable graph node identity.

@@ -22,7 +22,7 @@ def main() -> int:
         "## 7. Paper-to-live change control",
         "## 8. Evidence retention",
         "## 9. Credential rotation",
-        "npm ci --prefix ui",
+        "cargo build --locked -p insider-runtime -p insider-terminal",
         "broker.mode = \"paper\"",
         "data/insidertrader.cfg already exists",
         "--journal data/runtime.journal",
@@ -30,9 +30,7 @@ def main() -> int:
         "reconciliation",
         "Live trading remains disabled",
         "Never test revocation by submitting a live order",
-        "libwebkit2gtk-4.1-dev",
-        "libjavascriptcoregtk-4.1-dev",
-        "do not substitute a web-only",
+        "insider-terminal --socket data/runtime.sock",
     )
     missing = [marker for marker in required if marker not in text]
     if missing:
@@ -51,7 +49,7 @@ def main() -> int:
         "## 4. Broker and statement reconciliation",
         "## 5. Canary and approval record",
         "## 6. Evidence manifest",
-        "npm ci --prefix ui",
+        "cargo build --locked -p insider-runtime -p insider-terminal",
         "REDUCE_ONLY",
         "signed G15 YAML manifest",
     )

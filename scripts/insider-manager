@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG="${IT_CONFIG:-${ROOT_DIR}/config/example.cfg}"
+JOURNAL="${IT_JOURNAL:-${ROOT_DIR}/data/insidertrader.journal}"
+SOCKET="${IT_SOCKET:-/tmp/insidertrader-engine.sock}"
+SYMBOL="${IT_SYMBOL:-NVDA}"
+ENGINE_PID=""
+
+usage() { echo "usage: insider-manager {check|start|terminal|run}"; }
+[[ -f "$CONFIG" ]] || { echo "manager: CFG not found: $CONFIG" >&2; exit 2; }
+command -v cargo >/dev/null || { echo "manager: cargo is required" >&2; exit 2; }
+check() {
+  grep -Eq "^[[:space:]]*market\.yahoo_symbols[[:space:]]*=" "$CONFIG" || { echo "manager: configure market.yahoo_symbols for $SYMBOL in the CFG before starting" >&2; return 4; }
+  local probe_dir probe_journal probe_socket status
+  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/insidertrader-manager.XXXXXX")"
+  probe_journal="$probe_dir/runtime.journal"
+  probe_socket="$probe_dir/runtime.sock"
+  status=0
+  cargo run --locked -p insider-runtime -- serve --check --config "$CONFIG" --journal "$probe_journal" --socket "$probe_socket" --account "${IT_ACCOUNT:-1}" || status=$?
+  rm -rf -- "$probe_dir"
+  return "$status"
+}
+recover_stale_journal_lock() {
+  local lock_path owner_pid stale_path
+  lock_path="${JOURNAL%.*}.lock"
+  [[ -f "$lock_path" ]] || return 0
+  owner_pid="$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$lock_path" | head -n 1)"
+  if [[ -n "$owner_pid" ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    echo "manager: journal is owned by running engine PID $owner_pid" >&2
+    return 7
+  fi
+  stale_path="${lock_path}.stale.$(date +%s)"
+  mv -- "$lock_path" "$stale_path"
+  echo "manager: recovered stale journal lock to $stale_path" >&2
+}
+start() {
+  check
+  mkdir -p "$(dirname "$JOURNAL")"
+  recover_stale_journal_lock
+  [[ ! -e "$SOCKET" ]] || { echo "manager: socket already exists: $SOCKET (stop the previous runtime first)" >&2; exit 5; }
+  exec cargo run --locked -p insider-runtime -- serve --config "$CONFIG" --journal "$JOURNAL" --socket "$SOCKET" --account "${IT_ACCOUNT:-1}"
+}
+terminal() {
+  [[ -S "$SOCKET" ]] || { echo "manager: engine socket is absent; run 'insider-manager start' first" >&2; exit 3; }
+  IT_ENGINE_SOCKET="$SOCKET" exec cargo run --locked -p insider-terminal
+}
+run() {
+  check
+  mkdir -p "$(dirname "$JOURNAL")"
+  recover_stale_journal_lock
+  [[ ! -e "$SOCKET" ]] || { echo "manager: socket already exists: $SOCKET (stop the previous runtime first)" >&2; exit 5; }
+  cargo run --locked -p insider-runtime -- serve --config "$CONFIG" --journal "$JOURNAL" --socket "$SOCKET" --account "${IT_ACCOUNT:-1}" &
+  ENGINE_PID=$!
+  cleanup() {
+    [[ -z "$ENGINE_PID" ]] || kill "$ENGINE_PID" 2>/dev/null || true
+    [[ -z "$ENGINE_PID" ]] || wait "$ENGINE_PID" 2>/dev/null || true
+    [[ ! -S "$SOCKET" ]] || rm -f -- "$SOCKET"
+  }
+  trap cleanup EXIT INT TERM
+  local attempt
+  for attempt in $(seq 1 120); do
+    [[ -S "$SOCKET" ]] && break
+    kill -0 "$ENGINE_PID" 2>/dev/null || { wait "$ENGINE_PID"; return $?; }
+    sleep 0.25
+  done
+  [[ -S "$SOCKET" ]] || { echo "manager: engine did not create its socket within 30 seconds" >&2; return 6; }
+  IT_ENGINE_SOCKET="$SOCKET" cargo run --locked -p insider-terminal
+}
+case "${1:-}" in check) check;; start) start;; terminal) terminal;; run) run;; *) usage >&2; exit 2;; esac

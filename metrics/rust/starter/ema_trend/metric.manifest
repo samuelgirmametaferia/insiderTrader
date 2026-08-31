@@ -1,0 +1,12 @@
+# Built-in Rust adapter: insider_metric_sdk::NormalizedEmaTrend.
+metric:
+id: trend.ema.normalized.v1
+language: rust
+inputs: [bar_index, close_price]
+min_score: -1.0
+max_score: 1.0
+ttl_ns: 5000000000
+period_ns: 5000000000
+deadline_ns: 5000000000
+budget_ns: 5000000000
+priority: normal

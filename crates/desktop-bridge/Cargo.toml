@@ -1,5 +1,5 @@
 [package]
-name = "insider-desktop-bridge"
+name = "insider-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +7,13 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[lib]
+name = "insider_runtime"
+
+[[bin]]
+name = "insider-runtime"
+path = "src/main.rs"
 
 [dependencies]
 insider-broker-api = { path = "../broker-api" }

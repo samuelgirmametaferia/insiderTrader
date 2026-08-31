@@ -1,0 +1,11 @@
+# Built-in Rust adapter: insider_metric_sdk::NormalizedAverageTrueRange.
+metric:
+id: volatility.atr.normalized.v1
+language: rust
+inputs: [bar_index, high_price, low_price, close_price]
+min_score: 0.0
+ttl_ns: 5000000000
+period_ns: 5000000000
+deadline_ns: 5000000000
+budget_ns: 5000000000
+priority: normal

@@ -1,0 +1,13 @@
+strategy:
+  id: "equity.python.momentum_threshold.v1"
+  language: "python"
+  entrypoint: "strategies.python.starter.momentum_threshold: evaluate"
+  mode: "deterministic"
+  metrics: [momentum.return_clamped.v1]
+  missing_evidence: no_action
+  dependencies: []
+  horizon_ns: 900000000000
+  ttl_ns: 5000000000
+  period_ns: 1000000000
+  deadline_ns: 2000000
+  priority: FAST

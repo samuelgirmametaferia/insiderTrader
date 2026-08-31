@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Repository-local one-command operator entrypoint.  The Rust launcher performs
+# the bounded setup and process composition; this wrapper keeps `insider` usable
+# before the workspace has been installed as a system binary.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+exec cargo run --locked -p insider-launcher -- "$@"
