@@ -67,7 +67,7 @@ jobs:
 
       - name: Audit Rust dependencies
         run: |
-          cargo install cargo-audit --locked --version 0.21.2
+          cargo install cargo-audit --locked --version 0.22.0
           cargo audit --deny warnings
 
       - name: Verify clean generated/schema state
