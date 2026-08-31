@@ -67,7 +67,8 @@ jobs:
 
       - name: Audit Rust dependencies
         run: |
-          cargo install cargo-audit --locked --version 0.21.2
+          # 0.22.2 understands current RustSec advisories, including CVSS 4.0.
+          cargo install cargo-audit --locked --version 0.22.2
           cargo audit --deny warnings
 
       - name: Verify clean generated/schema state
