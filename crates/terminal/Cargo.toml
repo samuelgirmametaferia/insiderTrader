@@ -9,8 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-crossterm = "0.28"
-ratatui = "0.29"
+crossterm = "0.29"
+ratatui = "0.30"
 insider-autonomy = { path = "../autonomy" }
 insider-broker-api = { path = "../broker-api" }
 insider-common-types = { path = "../common-types" }
@@ -21,5 +21,5 @@ insider-llm-core = { path = "../llm-core" }
 insider-metric-host = { path = "../metric-host" }
 insider-risk-engine = { path = "../risk-engine" }
 insider-strategy-host = { path = "../strategy-host" }
-sha2 = "0.10"
+sha2 = "0.11"
 unicode-width = "0.2"
