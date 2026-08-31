@@ -17,6 +17,10 @@
 
 > InsiderTrader is an open-source, paper-first foundation—not financial advice and not a promise of profit. Live trading is intentionally gated by external certification evidence.
 
+If this project is useful to you, a GitHub star helps other builders find it. Feedback,
+bug reports, and small improvements are especially welcome while the platform is in
+paper-first development.
+
 ## Why it exists
 
 Most trading tools blur research, UI state, model output, and broker state together.
