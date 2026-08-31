@@ -3350,18 +3350,14 @@ mod chart_tests {
                 })
                 .collect(),
         });
-        let Ok(mut terminal) = Terminal::new(TestBackend::new(120, 32)) else {
-            return;
-        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).expect("test backend initializes");
         assert!(terminal.draw(|frame| draw(frame, &app)).is_ok());
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("CANDLE"));
         assert!(text.contains("SMA20,VWAP"));
         assert!(text.contains("XHAIR"));
 
-        let Ok(mut compact) = Terminal::new(TestBackend::new(22, 9)) else {
-            return;
-        };
+        let mut compact = Terminal::new(TestBackend::new(22, 9)).expect("test backend initializes");
         assert!(compact.draw(|frame| draw(frame, &app)).is_ok());
     }
 
