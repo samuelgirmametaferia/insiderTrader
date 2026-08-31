@@ -3350,7 +3350,8 @@ mod chart_tests {
                 })
                 .collect(),
         });
-        let mut terminal = Terminal::new(TestBackend::new(120, 32)).expect("test backend initializes");
+        let mut terminal =
+            Terminal::new(TestBackend::new(120, 32)).expect("test backend initializes");
         assert!(terminal.draw(|frame| draw(frame, &app)).is_ok());
         let text = buffer_text(terminal.backend().buffer());
         assert!(text.contains("CANDLE"));
