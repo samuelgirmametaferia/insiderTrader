@@ -35,6 +35,8 @@ for frame in "${frames[@]}"; do
 done
 
 convert -delay 100 -loop 0 "$WORK_DIR"/frame-*.png "$MEDIA_DIR/insidertrader-demo.gif"
-ffmpeg -y -loglevel error -framerate 10 -i "$WORK_DIR/frame-%d.png" \
-  -pix_fmt yuv420p -movflags +faststart "$MEDIA_DIR/insidertrader-demo.mp4"
+# Keep each illustrative frame on screen for three seconds.  The GIF is also
+# looped three times so the MP4 is long enough for social previews (12 seconds).
+ffmpeg -y -loglevel error -framerate 1/3 -i "$WORK_DIR/frame-%d.png" \
+  -vf 'fps=10,format=yuv420p' -t 12 -movflags +faststart "$MEDIA_DIR/insidertrader-demo.mp4"
 printf 'Wrote %s and %s\n' "$MEDIA_DIR/insidertrader-demo.gif" "$MEDIA_DIR/insidertrader-demo.mp4"
